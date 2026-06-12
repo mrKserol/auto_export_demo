@@ -1,0 +1,35 @@
+# Auto Export Demo — project context
+
+This is an MVP Telegram bot for auto export document workflow.
+
+Main goal:
+- Telegram bot receives documents from a private Telegram group.
+- Bot saves original files to Yandex Disk.
+- Bot stores metadata and extracted document fields in PostgreSQL.
+- Bot sends files/text to OCR/LLM workflow.
+- Bot checks consistency between documents:
+  - VIN
+  - contract number
+  - customer passport data
+  - amount
+  - currency
+  - HS code
+  - net weight
+  - gross weight
+  - vehicle model
+- Bot replies to Telegram group with validation results.
+
+Architecture:
+- Backend: Python
+- Telegram bot: aiogram or python-telegram-bot
+- Database: PostgreSQL on Railway
+- Storage: Yandex Disk
+- OCR/LLM: Yandex AI Studio / Yandex Cloud
+- Deploy: Railway
+
+Important:
+- Do not hardcode secrets.
+- Use environment variables.
+- Keep code simple for MVP.
+- Prefer small modules and clear functions.
+- First priority is working file intake from Telegram to Yandex Disk and PostgreSQL.
