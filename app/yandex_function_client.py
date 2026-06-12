@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import logging
 from typing import Any
 
 import aiohttp
+
+
+logger = logging.getLogger(__name__)
+REQUEST_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -29,7 +35,35 @@ class YandexFunctionClient:
             "telegram_message_id": telegram_message_id,
         }
 
-        async with aiohttp.ClientSession() as session:
+        logger.info("Calling Yandex Function with payload: %s", payload)
+
+        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(self.url, json=payload) as response:
-                response.raise_for_status()
-                return await response.json()
+                text = await response.text()
+                logger.info("Yandex Function response status: %s", response.status)
+
+                if response.status >= 400:
+                    error_body = _format_response_body(text)
+                    logger.error(
+                        "Yandex Function returned %s: %s",
+                        response.status,
+                        error_body,
+                    )
+                    raise RuntimeError(
+                        f"Yandex Function error {response.status}: {error_body}"
+                    )
+
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"Yandex Function returned invalid JSON: {text}"
+                    ) from exc
+
+
+def _format_response_body(text: str) -> str:
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False)
+    except json.JSONDecodeError:
+        return text
