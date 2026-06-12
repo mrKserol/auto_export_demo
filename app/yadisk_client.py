@@ -75,17 +75,9 @@ class YandexDiskClient:
             return payload["href"]
 
     def build_file_path(self, chat_id: int, message_id: int, file_name: str) -> str:
-        safe_name = _sanitize_filename(file_name)
-        return f"{self.base_path}/{chat_id}/{safe_name}"
+        return f"{self.base_path}/{chat_id}/{file_name}"
 
     @staticmethod
     def _normalize_path(path: str) -> str:
         return "/" + path.strip("/")
 
-
-def _sanitize_filename(file_name: str) -> str:
-    sanitized = "".join(
-        char if char.isalnum() or char in (" ", ".", "_", "-") else "_"
-        for char in file_name
-    ).strip()
-    return sanitized or "document"

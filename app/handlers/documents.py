@@ -124,4 +124,73 @@ async def handle_document(
         await message.reply("Файл сохранён, автообработка вернула ошибку.")
         return
 
-    await message.reply("✅ Файл принят, сохранён и обработан.")
+    await message.reply(_build_processing_success_reply(original_filename, response_payload))
+
+
+def _build_processing_success_reply(
+    original_filename: str,
+    response_payload: dict,
+) -> str:
+    document_type = _value_or_not_found(
+        _get_nested(response_payload, "extracted_data", "document_type")
+    )
+    vin = _value_or_not_found(
+        _get_nested(response_payload, "extracted_data", "car", "vin")
+    )
+    epts_number = _value_or_not_found(
+        _get_nested(
+            response_payload,
+            "extracted_data",
+            "vehicle_passport",
+            "epts_number",
+        )
+    )
+    contract_number = _value_or_not_found(
+        _get_nested(
+            response_payload,
+            "extracted_data",
+            "document_numbers",
+            "contract_number",
+        )
+    )
+    invoice_number = _value_or_not_found(
+        _get_nested(
+            response_payload,
+            "extracted_data",
+            "document_numbers",
+            "invoice_number",
+        )
+    )
+    amount = _value_or_not_found(
+        _get_nested(response_payload, "extracted_data", "price", "amount")
+    )
+    currency = _value_or_not_found(
+        _get_nested(response_payload, "extracted_data", "price", "currency")
+    )
+    pages_processed = _value_or_not_found(response_payload.get("pages_processed"))
+
+    return (
+        f"✅ Файл обработан: {original_filename}\n\n"
+        f"Тип: {document_type}\n"
+        f"VIN: {vin}\n"
+        f"ЭПТС: {epts_number}\n"
+        f"Контракт: {contract_number}\n"
+        f"Инвойс: {invoice_number}\n"
+        f"Сумма: {amount} {currency}\n"
+        f"Страниц: {pages_processed}"
+    )
+
+
+def _get_nested(payload: dict, *keys: str) -> object:
+    current: object = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _value_or_not_found(value: object) -> str:
+    if value is None or value == "":
+        return "не найдено"
+    return str(value)

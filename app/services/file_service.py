@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import re
+import unicodedata
 
 from aiogram import Bot
 from aiogram.types import Document
@@ -24,16 +26,37 @@ def is_supported_file(filename: str) -> bool:
 
 
 def build_stored_filename(message_id: int, filename: str) -> str:
-    safe_name = sanitize_filename(filename)
-    return f"{message_id}_{safe_name}"
+    normalized_name = normalize_stored_filename(filename)
+    return f"{message_id}_{normalized_name}"
 
 
-def sanitize_filename(filename: str) -> str:
+def normalize_stored_filename(filename: str) -> str:
+    normalized = unicodedata.normalize("NFC", filename).strip()
+    suffix = Path(normalized).suffix
+
+    if suffix:
+        extension = suffix.removeprefix(".").lower()
+        stem = normalized[: -len(suffix)].rstrip()
+    else:
+        extension = ""
+        stem = normalized
+
+    stem = re.sub(r"\s+", "_", stem.strip())
+    stem = _sanitize_filename_part(stem) or "document"
+
+    if not extension:
+        return stem
+
+    extension = _sanitize_filename_part(extension.lower())
+    return f"{stem}.{extension}"
+
+
+def _sanitize_filename_part(value: str) -> str:
     sanitized = "".join(
-        char if char.isalnum() or char in (" ", ".", "_", "-") else "_"
-        for char in filename
-    ).strip()
-    return sanitized or "document"
+        char if char.isalnum() or char in (".", "_", "-") else "_"
+        for char in value
+    )
+    return sanitized.strip("._-")
 
 
 async def download_telegram_document(bot: Bot, document: Document) -> bytes:
