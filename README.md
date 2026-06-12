@@ -90,7 +90,7 @@ payload to the function:
 1. Create a Railway project.
 2. Add a PostgreSQL database and copy its `DATABASE_URL`.
 3. Add all required environment variables.
-4. Set the start command:
+4. Deploy the repo. `railpack.json` sets the start command:
 
 ```bash
 python -m app.main

@@ -6,6 +6,15 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 
 from app.database import Database, DocumentMetadata
+from app.services.case_service import (
+    bind_document_to_case,
+    build_case_success_reply,
+    build_uncertain_binding_reply,
+    extract_business_fields,
+    find_or_create_case,
+    run_basic_case_checks,
+    save_document_fields,
+)
 from app.services.file_service import (
     build_stored_filename,
     download_telegram_document,
@@ -124,73 +133,66 @@ async def handle_document(
         await message.reply("Файл сохранён, автообработка вернула ошибку.")
         return
 
-    await message.reply(_build_processing_success_reply(original_filename, response_payload))
-
-
-def _build_processing_success_reply(
-    original_filename: str,
-    response_payload: dict,
-) -> str:
-    document_type = _value_or_not_found(
-        _get_nested(response_payload, "extracted_data", "document_type")
+    fields = extract_business_fields(response_payload)
+    binding_result = await find_or_create_case(
+        database,
+        fields,
+        case_folder_path_builder=yandex_disk_client.build_case_folder_path,
     )
-    vin = _value_or_not_found(
-        _get_nested(response_payload, "extracted_data", "car", "vin")
+
+    if binding_result["status"] == "needs_manual_bind":
+        candidates = binding_result["candidates"]
+        await database.bind_document_to_case(
+            document_id,
+            None,
+            score=binding_result["score"],
+            status="needs_manual_bind",
+            candidates=candidates,
+        )
+        await save_document_fields(database, document_id, None, fields)
+        await message.reply(
+            build_uncertain_binding_reply(
+                document_id=document_id,
+                original_filename=original_filename,
+                fields=fields,
+                candidates=candidates,
+            )
+        )
+        return
+
+    case_data = binding_result["case"]
+    case_id = int(case_data["id"])
+    await bind_document_to_case(
+        database,
+        document_id,
+        case_id,
+        score=binding_result["score"],
+        status=binding_result["status"],
     )
-    epts_number = _value_or_not_found(
-        _get_nested(
-            response_payload,
-            "extracted_data",
-            "vehicle_passport",
-            "epts_number",
+    await save_document_fields(database, document_id, case_id, fields)
+    await run_basic_case_checks(database, case_id)
+
+    case_folder_name = case_data["case_folder_name"]
+    case_file_path = yandex_disk_client.build_case_file_path(
+        case_folder_name,
+        stored_filename,
+    )
+    try:
+        moved_path = await yandex_disk_client.move_resource(uploaded_path, case_file_path)
+        await database.update_document_paths(document_id, current_yadisk_path=moved_path)
+    except Exception as exc:
+        logger.exception("Failed to move document %s to case folder", document_id)
+        await database.update_document_paths(
+            document_id,
+            current_yadisk_path=uploaded_path,
+            error_message=f"Yandex Disk move failed: {exc}",
+        )
+
+    await message.reply(
+        build_case_success_reply(
+            case_data=case_data,
+            fields=fields,
+            pages_processed=response_payload.get("pages_processed"),
         )
     )
-    contract_number = _value_or_not_found(
-        _get_nested(
-            response_payload,
-            "extracted_data",
-            "document_numbers",
-            "contract_number",
-        )
-    )
-    invoice_number = _value_or_not_found(
-        _get_nested(
-            response_payload,
-            "extracted_data",
-            "document_numbers",
-            "invoice_number",
-        )
-    )
-    amount = _value_or_not_found(
-        _get_nested(response_payload, "extracted_data", "price", "amount")
-    )
-    currency = _value_or_not_found(
-        _get_nested(response_payload, "extracted_data", "price", "currency")
-    )
-    pages_processed = _value_or_not_found(response_payload.get("pages_processed"))
 
-    return (
-        f"✅ Файл обработан: {original_filename}\n\n"
-        f"Тип: {document_type}\n"
-        f"VIN: {vin}\n"
-        f"ЭПТС: {epts_number}\n"
-        f"Контракт: {contract_number}\n"
-        f"Инвойс: {invoice_number}\n"
-        f"Сумма: {amount} {currency}\n"
-        f"Страниц: {pages_processed}"
-    )
-
-
-def _get_nested(payload: dict, *keys: str) -> object:
-    current: object = payload
-    for key in keys:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
-
-
-def _value_or_not_found(value: object) -> str:
-    if value is None or value == "":
-        return "не найдено"
-    return str(value)
