@@ -6,10 +6,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
-from app.handlers.customers import _build_customer_action_keyboard, _can_edit_customer
+from app.handlers.customers import (
+    is_admin_for_customer_management,
+)
 from app.services.customer_card_service import (
     build_customer_card,
-    build_specification_created_reply,
+    build_customer_card_keyboard,
 )
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
@@ -25,6 +27,59 @@ from app.states.specification_states import SpecificationAddStates, Specificatio
 router = Router(name="specifications")
 
 
+@router.callback_query(F.data.startswith("customer_generate_contract:"))
+async def handle_generate_contract(callback: CallbackQuery) -> None:
+    if callback.message is None:
+        return
+    await callback.message.answer(
+        "Формирование договора будет добавлено на следующем этапе."
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("customer_add_spec:"))
+async def handle_customer_add_spec(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+) -> None:
+    if callback.message is None:
+        return
+
+    customer_id = int(callback.data.split(":", 1)[1])
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        await callback.answer()
+        return
+    if customer.get("specification_id"):
+        await callback.message.answer("У клиента уже есть спецификация.")
+        await callback.answer()
+        return
+
+    await state.update_data(
+        customer_id=customer_id,
+        existing_specification_id=None,
+        specification_fields={},
+    )
+    await state.set_state(SpecificationAddStates.waiting_brand)
+    await callback.message.answer("Марка")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("customer_edit_spec:"))
+async def handle_customer_edit_spec_public(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+) -> None:
+    if callback.message is None:
+        return
+    customer_id = int(callback.data.split(":", 1)[1])
+    await _open_specification_edit_menu(callback, state, database, customer_id)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("edit_customer_specification:"))
 async def handle_edit_customer_specification(
     callback: CallbackQuery,
@@ -35,17 +90,29 @@ async def handle_edit_customer_specification(
     if callback.message is None or callback.from_user is None:
         return
 
-    if not await _can_edit_customer(
+    if not await is_admin_for_customer_management(
         bot, callback.message.chat.id, callback.from_user.id
     ):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
     customer_id = int(callback.data.split(":", 1)[1])
+    await _open_specification_edit_menu(callback, state, database, customer_id)
+    await callback.answer()
+
+
+async def _open_specification_edit_menu(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+    customer_id: int,
+) -> None:
+    if callback.message is None:
+        return
+
     customer = await database.get_customer_by_id(customer_id)
     if not customer:
         await callback.message.answer("Клиент не найден")
-        await callback.answer()
         return
 
     created = False
@@ -61,7 +128,6 @@ async def handle_edit_customer_specification(
     )
     if specification is None:
         await callback.message.answer("Не удалось загрузить спецификацию")
-        await callback.answer()
         return
 
     await state.set_state(CustomerEditStates.choosing_field)
@@ -83,7 +149,6 @@ async def handle_edit_customer_specification(
             customer_id,
         ),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("spec_edit_back:"))
@@ -96,12 +161,6 @@ async def handle_spec_edit_back(
     if callback.message is None or callback.from_user is None:
         return
 
-    if not await _can_edit_customer(
-        bot, callback.message.chat.id, callback.from_user.id
-    ):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-
     customer_id = int(callback.data.split(":", 1)[1])
     customer = await database.get_customer_by_id(customer_id)
     if not customer:
@@ -109,11 +168,14 @@ async def handle_spec_edit_back(
         await callback.answer()
         return
 
+    is_admin = await is_admin_for_customer_management(
+        bot, callback.message.chat.id, callback.from_user.id
+    )
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=_build_customer_action_keyboard(customer_id),
+        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
     )
     await callback.answer()
 
@@ -122,16 +184,9 @@ async def handle_spec_edit_back(
 async def handle_edit_spec_field(
     callback: CallbackQuery,
     state: FSMContext,
-    bot: Bot,
     database: Database,
 ) -> None:
-    if callback.message is None or callback.from_user is None:
-        return
-
-    if not await _can_edit_customer(
-        bot, callback.message.chat.id, callback.from_user.id
-    ):
-        await callback.answer("Недостаточно прав", show_alert=True)
+    if callback.message is None:
         return
 
     _, specification_id_str, field_name = callback.data.split(":", 2)
@@ -317,6 +372,7 @@ async def handle_spec_price(
     message: Message,
     state: FSMContext,
     database: Database,
+    bot: Bot,
 ) -> None:
     await _save_spec_field(message, state, "price")
     data = await state.get_data()
@@ -329,7 +385,7 @@ async def handle_spec_price(
         )
         return
 
-    await _finalize_specification(message, state, database)
+    await _finalize_specification(message, state, database, bot)
 
 
 @router.callback_query(
@@ -340,10 +396,11 @@ async def handle_spec_replace_yes(
     callback: CallbackQuery,
     state: FSMContext,
     database: Database,
+    bot: Bot,
 ) -> None:
     if callback.message is None:
         return
-    await _finalize_specification(callback.message, state, database)
+    await _finalize_specification(callback.message, state, database, bot)
     await callback.answer()
 
 
@@ -382,6 +439,7 @@ async def _finalize_specification(
     message: Message,
     state: FSMContext,
     database: Database,
+    bot: Bot | None = None,
 ) -> None:
     data = await state.get_data()
     customer_id = data.get("customer_id")
@@ -394,7 +452,17 @@ async def _finalize_specification(
     specification_id = await database.create_specification(specification_fields)
     customer = await database.attach_specification_to_customer(customer_id, specification_id)
     await state.clear()
-    await message.answer(await build_specification_created_reply(customer, database))
+
+    is_admin = False
+    if bot is not None and message.from_user is not None:
+        is_admin = await is_admin_for_customer_management(
+            bot, message.chat.id, message.from_user.id
+        )
+
+    await message.answer(
+        "✅ Спецификация добавлена\n\n" + await build_customer_card(customer, database),
+        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+    )
 
 
 def _build_replace_keyboard() -> InlineKeyboardMarkup:

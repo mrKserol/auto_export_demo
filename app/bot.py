@@ -9,6 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import Settings
 from app.database import Database
+from app.handlers.customer_add import router as customer_add_router
 from app.handlers.customers import router as customers_router
 from app.handlers.documents import router as documents_router
 from app.handlers.recognize import router as recognize_router
@@ -28,6 +29,7 @@ def create_bot(settings: Settings) -> Bot:
 def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    dispatcher.include_router(customer_add_router)
     dispatcher.include_router(customers_router)
     dispatcher.include_router(specifications_router)
     dispatcher.include_router(recognize_router)

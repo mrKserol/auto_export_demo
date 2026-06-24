@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from io import BytesIO
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
@@ -9,16 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
-from app.services.customer_card_service import build_customer_card
-from app.services.customer_extraction_service import (
-    extract_customer_fields_from_response,
-    merge_customer_fields,
-)
-from app.services.file_service import (
-    build_stored_filename,
-    get_original_filename,
-    is_supported_file,
-)
+from app.services.customer_card_service import build_customer_card, build_customer_card_keyboard
 from app.services.validation_service import (
     normalize_date,
     normalize_department_code,
@@ -31,9 +21,7 @@ from app.services.validation_service import (
     validate_name,
     validate_registration_address,
 )
-from app.states.customer_states import CustomerAddStates, CustomerEditStates
-from app.yadisk_client import YandexDiskClient
-from app.yandex_function_client import YandexFunctionClient
+from app.states.customer_states import CustomerEditStates
 
 
 router = Router(name="customers")
@@ -53,147 +41,6 @@ FIELD_LABELS = {
     "phone": "Изменить Номер телефона",
     "email": "Изменить email",
 }
-
-
-@router.message(Command("add_customer"))
-async def handle_add_customer(message: Message, state: FSMContext) -> None:
-    await state.set_state(CustomerAddStates.collecting_files)
-    await state.update_data(
-        uploaded_files=[],
-        customer_fields={},
-        warnings=[],
-    )
-    await message.answer(
-        "Загрузите файлы паспорта с главной страницей и регистрацией, "
-        "СНИЛС, ИНН. Когда загрузите все файлы, отправьте /done_customer_files."
-    )
-
-
-@router.message(
-    StateFilter(CustomerAddStates.collecting_files),
-    Command("done_customer_files"),
-)
-async def handle_done_customer_files(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    uploaded_files = data.get("uploaded_files") or []
-    if not uploaded_files:
-        await message.answer("Сначала загрузите хотя бы один файл.")
-        return
-
-    await state.set_state(CustomerAddStates.waiting_phone)
-    await message.answer("Введите номер телефона")
-
-
-@router.message(StateFilter(CustomerAddStates.collecting_files), F.document)
-async def handle_customer_document(
-    message: Message,
-    state: FSMContext,
-    bot: Bot,
-    yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
-) -> None:
-    document = message.document
-    if document is None:
-        return
-    await _process_customer_file(
-        message=message,
-        state=state,
-        bot=bot,
-        yandex_disk_client=yandex_disk_client,
-        yandex_function_client=yandex_function_client,
-        enable_processing=enable_processing,
-        file_id=document.file_id,
-        original_filename=get_original_filename(document),
-        mime_type=document.mime_type,
-    )
-
-
-@router.message(StateFilter(CustomerAddStates.collecting_files), F.photo)
-async def handle_customer_photo(
-    message: Message,
-    state: FSMContext,
-    bot: Bot,
-    yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
-) -> None:
-    photo = message.photo[-1]
-    await _process_customer_file(
-        message=message,
-        state=state,
-        bot=bot,
-        yandex_disk_client=yandex_disk_client,
-        yandex_function_client=yandex_function_client,
-        enable_processing=enable_processing,
-        file_id=photo.file_id,
-        original_filename=f"{message.message_id}_photo.jpg",
-        mime_type="image/jpeg",
-    )
-
-
-@router.message(StateFilter(CustomerAddStates.waiting_phone), F.text)
-async def handle_customer_phone(message: Message, state: FSMContext) -> None:
-    phone = normalize_phone(message.text)
-    if not phone:
-        await message.answer(
-            "Неверный формат телефона. Введите номер в формате +79171234567"
-        )
-        return
-
-    await state.update_data(phone=phone)
-    await state.set_state(CustomerAddStates.waiting_email)
-    await message.answer("Введите email")
-
-
-@router.message(StateFilter(CustomerAddStates.waiting_email), F.text)
-async def handle_customer_email(
-    message: Message,
-    state: FSMContext,
-    database: Database,
-) -> None:
-    email = (message.text or "").strip()
-    if not validate_email(email):
-        await message.answer("Неверный формат email. Введите адрес вида example@mail.ru")
-        return
-
-    data = await state.get_data()
-    customer_fields = data.get("customer_fields") or {}
-    passport = customer_fields.get("passport")
-    if not passport:
-        await message.answer(
-            "Не удалось определить паспорт из загруженных файлов. "
-            "Попробуйте /add_customer заново."
-        )
-        await state.clear()
-        return
-
-    existing = await database.find_customer_by_passport(passport)
-    if existing:
-        await message.answer("Клиент с таким паспортом уже существует")
-        await state.clear()
-        return
-
-    customer_data = {
-        "passport": passport,
-        "first_name": customer_fields.get("first_name"),
-        "last_name": customer_fields.get("last_name"),
-        "surname": customer_fields.get("surname"),
-        "tin": customer_fields.get("tin"),
-        "ipain": customer_fields.get("ipain"),
-        "by_whom_issued": customer_fields.get("by_whom_issued"),
-        "date_issue": customer_fields.get("date_issue"),
-        "registration_address": customer_fields.get("registration_address"),
-        "department_code": customer_fields.get("department_code"),
-        "phone": data.get("phone"),
-        "email": email,
-        "specification_id": None,
-    }
-    customer = await database.create_customer(customer_data)
-    await state.clear()
-    await message.answer(
-        "✅ Клиент добавлен\n\n" + await build_customer_card(customer, database)
-    )
 
 
 @router.message(Command("search_edit_customer"))
@@ -223,9 +70,13 @@ async def handle_search_passport(
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer["id"])
 
-    can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
-    reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
-    await message.answer(await build_customer_card(customer, database), reply_markup=reply_markup)
+    is_admin = await is_admin_for_customer_management(
+        bot, message.chat.id, message.from_user.id if message.from_user else 0
+    )
+    await message.answer(
+        await build_customer_card(customer, database),
+        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+    )
 
 
 @router.callback_query(F.data.startswith("customer_delete:"))
@@ -238,10 +89,9 @@ async def handle_customer_delete(
     if callback.message is None or callback.from_user is None:
         return
 
-    can_edit = await _can_edit_customer(
+    if not await is_admin_for_customer_management(
         bot, callback.message.chat.id, callback.from_user.id
-    )
-    if not can_edit:
+    ):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -274,10 +124,9 @@ async def handle_customer_edit_menu(
     if callback.message is None or callback.from_user is None:
         return
 
-    can_edit = await _can_edit_customer(
+    if not await is_admin_for_customer_management(
         bot, callback.message.chat.id, callback.from_user.id
-    )
-    if not can_edit:
+    ):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -301,10 +150,9 @@ async def handle_customer_edit_back(
     if callback.message is None or callback.from_user is None:
         return
 
-    can_edit = await _can_edit_customer(
+    if not await is_admin_for_customer_management(
         bot, callback.message.chat.id, callback.from_user.id
-    )
-    if not can_edit:
+    ):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -319,7 +167,12 @@ async def handle_customer_edit_back(
     await state.update_data(customer_id=customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=_build_customer_action_keyboard(customer_id),
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=await is_admin_for_customer_management(
+                bot, callback.message.chat.id, callback.from_user.id
+            ),
+        ),
     )
     await callback.answer()
 
@@ -333,10 +186,9 @@ async def handle_customer_edit_field(
     if callback.message is None or callback.from_user is None:
         return
 
-    can_edit = await _can_edit_customer(
+    if not await is_admin_for_customer_management(
         bot, callback.message.chat.id, callback.from_user.id
-    )
-    if not can_edit:
+    ):
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -374,131 +226,14 @@ async def handle_customer_new_value(
             return
 
     customer = await database.update_customer(customer_id, field_name, normalized)
-    can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
-    reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
-    await message.answer(await build_customer_card(customer, database), reply_markup=reply_markup)
+    is_admin = await is_admin_for_customer_management(
+        bot, message.chat.id, message.from_user.id if message.from_user else 0
+    )
+    await message.answer(
+        await build_customer_card(customer, database),
+        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+    )
     await state.set_state(CustomerEditStates.choosing_action)
-
-
-async def _process_customer_file(
-    *,
-    message: Message,
-    state: FSMContext,
-    bot: Bot,
-    yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
-    file_id: str,
-    original_filename: str,
-    mime_type: str | None,
-) -> None:
-    if not is_supported_file(original_filename):
-        await message.reply(
-            "Формат файла не поддерживается. Поддерживаются: "
-            "pdf, jpg, jpeg, png, webp, heic, docx, xlsx."
-        )
-        return
-
-    user = message.from_user
-    if user is None:
-        await message.reply("Не удалось определить пользователя Telegram.")
-        return
-
-    try:
-        telegram_file = await bot.get_file(file_id)
-        if telegram_file.file_path is None:
-            raise RuntimeError("Telegram did not return a file path")
-
-        buffer = BytesIO()
-        await bot.download_file(telegram_file.file_path, destination=buffer)
-        file_content = buffer.getvalue()
-    except Exception:
-        logger.exception("Failed to download customer file")
-        await message.reply("Не удалось скачать файл из Telegram.")
-        return
-
-    stored_filename = build_stored_filename(message.message_id, original_filename)
-    disk_path = yandex_disk_client.build_customer_intake_file_path(
-        telegram_user_id=user.id,
-        file_name=stored_filename,
-    )
-    try:
-        uploaded_path = await yandex_disk_client.upload_bytes(disk_path, file_content)
-    except Exception:
-        logger.exception("Failed to upload customer file to Yandex Disk")
-        await message.reply("Не удалось сохранить файл в Yandex Disk.")
-        return
-
-    data = await state.get_data()
-    uploaded_files = list(data.get("uploaded_files") or [])
-    uploaded_files.append(
-        {
-            "path": uploaded_path,
-            "original_filename": original_filename,
-            "stored_filename": stored_filename,
-        }
-    )
-
-    customer_fields = dict(data.get("customer_fields") or {})
-    warnings = list(data.get("warnings") or [])
-    extraction_note = ""
-
-    if enable_processing and yandex_function_client is not None:
-        try:
-            response_payload = await yandex_function_client.process_document(
-                document_id=0,
-                file_path=uploaded_path,
-                original_filename=original_filename,
-                mime_type=mime_type,
-                telegram_chat_id=message.chat.id,
-                telegram_message_id=message.message_id,
-            )
-            extracted = extract_customer_fields_from_response(response_payload)
-            customer_fields, new_warnings = merge_customer_fields(customer_fields, extracted)
-            warnings.extend(new_warnings)
-        except Exception:
-            logger.exception("Yandex Function extraction failed for customer file")
-            extraction_note = " (извлечение данных не удалось)"
-    elif enable_processing:
-        extraction_note = " (автообработка не настроена)"
-
-    await state.update_data(
-        uploaded_files=uploaded_files,
-        customer_fields=customer_fields,
-        warnings=warnings,
-    )
-
-    found_parts = []
-    for label, key in (
-        ("паспорт", "passport"),
-        ("СНИЛС", "ipain"),
-        ("ИНН", "tin"),
-        ("дата выдачи", "date_issue"),
-        ("код подразделения", "department_code"),
-    ):
-        value = customer_fields.get(key)
-        if value:
-            found_parts.append(f"{label} {value}")
-
-    found_text = ", ".join(found_parts) if found_parts else "данные пока не найдены"
-    await message.reply(f"Файл принят{extraction_note}. Найдено: {found_text}")
-
-
-def _build_customer_action_keyboard(customer_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Изменить данные",
-                    callback_data=f"customer_edit:{customer_id}",
-                ),
-                InlineKeyboardButton(
-                    text="Удалить клиента",
-                    callback_data=f"customer_delete:{customer_id}",
-                ),
-            ]
-        ]
-    )
 
 
 def _build_customer_field_keyboard(customer_id: int) -> InlineKeyboardMarkup:
@@ -576,13 +311,34 @@ def _validate_customer_field(field_name: str, raw_value: str) -> tuple[str | int
     return None, "Неизвестное поле"
 
 
-async def _can_edit_customer(bot: Bot, chat_id: int, user_id: int) -> bool:
-    # В личном чате с ботом разрешаем редактирование
+async def is_admin_for_customer_management(bot: Bot, chat_id: int, user_id: int) -> bool:
     if chat_id > 0:
-        return True
+        return False
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in {"administrator", "creator"}
     except Exception:
         logger.exception("Failed to check chat admin status")
         return False
+
+
+# Backward compatibility for specifications handler imports.
+async def _can_edit_customer(bot: Bot, chat_id: int, user_id: int) -> bool:
+    return await is_admin_for_customer_management(bot, chat_id, user_id)
+
+
+def _build_customer_action_keyboard(customer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Изменить данные",
+                    callback_data=f"customer_edit:{customer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Удалить клиента",
+                    callback_data=f"customer_delete:{customer_id}",
+                ),
+            ]
+        ]
+    )

@@ -1,7 +1,53 @@
 from __future__ import annotations
 
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from app.database import Database
 from app.services.specification_edit_service import format_specification_text
+
+
+def build_customer_card_keyboard(customer: dict, *, is_admin: bool) -> InlineKeyboardMarkup:
+    customer_id = int(customer["id"])
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if customer.get("specification_id"):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Сформировать договор",
+                    callback_data=f"customer_generate_contract:{customer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Изменить спецификацию",
+                    callback_data=f"customer_edit_spec:{customer_id}",
+                ),
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Добавить спецификацию",
+                    callback_data=f"customer_add_spec:{customer_id}",
+                )
+            ]
+        )
+
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Изменить данные",
+                    callback_data=f"customer_edit:{customer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Удалить клиента",
+                    callback_data=f"customer_delete:{customer_id}",
+                ),
+            ]
+        )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def format_customer_fio(customer: dict) -> str:

@@ -2,9 +2,15 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class CustomerAddStates(StatesGroup):
-    collecting_files = State()
+    waiting_passport_main = State()
+    waiting_registration = State()
+    waiting_snils = State()
+    waiting_tin = State()
     waiting_phone = State()
     waiting_email = State()
+    waiting_manual_registration_address = State()
+    waiting_manual_snils = State()
+    waiting_manual_tin = State()
 
 
 class RecognizeDocumentStates(StatesGroup):
