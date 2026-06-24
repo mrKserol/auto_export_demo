@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
 from app.handlers.customers import (
     is_admin_for_customer_management,
+)
+from app.services.contract_generation_service import (
+    CustomerNotFoundError,
+    CustomerSpecificationMissingError,
+    SpecificationNotFoundError,
+    TemplateNotFoundError,
+    generate_customer_contract_docx,
 )
 from app.services.customer_card_service import (
     build_customer_card,
@@ -25,16 +34,40 @@ from app.states.specification_states import SpecificationAddStates, Specificatio
 
 
 router = Router(name="specifications")
+logger = logging.getLogger(__name__)
 
 
 @router.callback_query(F.data.startswith("customer_generate_contract:"))
-async def handle_generate_contract(callback: CallbackQuery) -> None:
+async def handle_generate_contract(
+    callback: CallbackQuery,
+    database: Database,
+) -> None:
     if callback.message is None:
         return
-    await callback.message.answer(
-        "Формирование договора будет добавлено на следующем этапе."
-    )
+
+    customer_id = int(callback.data.split(":", 1)[1])
     await callback.answer()
+    await callback.message.answer("Формирую договор...")
+
+    try:
+        file_path = await generate_customer_contract_docx(customer_id, database)
+        await callback.message.answer_document(
+            FSInputFile(file_path),
+            caption="Готово. Договор сформирован.",
+        )
+    except CustomerNotFoundError:
+        await callback.message.answer("Клиент не найден.")
+    except CustomerSpecificationMissingError:
+        await callback.message.answer(
+            "У клиента нет спецификации авто. Сначала добавьте спецификацию."
+        )
+    except SpecificationNotFoundError:
+        await callback.message.answer("Спецификация клиента не найдена.")
+    except TemplateNotFoundError as error:
+        await callback.message.answer(str(error))
+    except Exception as error:
+        logger.exception("Contract generation failed for customer_id=%s", customer_id)
+        await callback.message.answer(f"Не удалось сформировать договор: {error}")
 
 
 @router.callback_query(F.data.startswith("customer_add_spec:"))
