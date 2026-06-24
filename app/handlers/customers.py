@@ -207,8 +207,8 @@ async def handle_search_passport(
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer["id"])
 
-    is_admin = await _is_chat_admin(bot, message.chat.id, message.from_user.id)
-    reply_markup = _build_customer_action_keyboard(customer["id"]) if is_admin else None
+    can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
+    reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
     await message.answer(build_customer_card(customer), reply_markup=reply_markup)
 
 
@@ -222,10 +222,10 @@ async def handle_customer_delete(
     if callback.message is None or callback.from_user is None:
         return
 
-    is_admin = await _is_chat_admin(
+    can_edit = await _can_edit_customer(
         bot, callback.message.chat.id, callback.from_user.id
     )
-    if not is_admin:
+    if not can_edit:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -258,10 +258,10 @@ async def handle_customer_edit_menu(
     if callback.message is None or callback.from_user is None:
         return
 
-    is_admin = await _is_chat_admin(
+    can_edit = await _can_edit_customer(
         bot, callback.message.chat.id, callback.from_user.id
     )
-    if not is_admin:
+    if not can_edit:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -284,10 +284,10 @@ async def handle_customer_edit_field(
     if callback.message is None or callback.from_user is None:
         return
 
-    is_admin = await _is_chat_admin(
+    can_edit = await _can_edit_customer(
         bot, callback.message.chat.id, callback.from_user.id
     )
-    if not is_admin:
+    if not can_edit:
         await callback.answer("Недостаточно прав", show_alert=True)
         return
 
@@ -325,8 +325,8 @@ async def handle_customer_new_value(
             return
 
     customer = await database.update_customer(customer_id, field_name, normalized)
-    is_admin = await _is_chat_admin(bot, message.chat.id, message.from_user.id)
-    reply_markup = _build_customer_action_keyboard(customer["id"]) if is_admin else None
+    can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
+    reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
     await message.answer(build_customer_card(customer), reply_markup=reply_markup)
     await state.set_state(CustomerEditStates.choosing_action)
 
@@ -517,9 +517,10 @@ def _validate_customer_field(field_name: str, raw_value: str) -> tuple[str | Non
     return None, "Неизвестное поле"
 
 
-async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+async def _can_edit_customer(bot: Bot, chat_id: int, user_id: int) -> bool:
+    # В личном чате с ботом разрешаем редактирование
     if chat_id > 0:
-        return False
+        return True
     try:
         member = await bot.get_chat_member(chat_id, user_id)
         return member.status in {"administrator", "creator"}
