@@ -852,16 +852,37 @@ class Database:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
 
-        contract_count = await self.count_contracts_for_customer(customer_id)
-        if contract_count > 0:
-            return False
-
         async with self._pool.acquire() as connection:
-            result = await connection.execute(
-                "DELETE FROM customers WHERE id = $1;",
-                customer_id,
-            )
-            return result.endswith("1")
+            async with connection.transaction():
+                customer = await connection.fetchrow(
+                    "SELECT specification_id FROM customers WHERE id = $1;",
+                    customer_id,
+                )
+                if customer is None:
+                    return False
+
+                contract_count = await connection.fetchval(
+                    "SELECT COUNT(*) FROM contracts WHERE customer_id = $1;",
+                    customer_id,
+                )
+                if int(contract_count) > 0:
+                    return False
+
+                result = await connection.execute(
+                    "DELETE FROM customers WHERE id = $1;",
+                    customer_id,
+                )
+                if not result.endswith("1"):
+                    return False
+
+                specification_id = customer["specification_id"]
+                if specification_id is not None:
+                    await connection.execute(
+                        "DELETE FROM specifications WHERE id = $1;",
+                        specification_id,
+                    )
+
+                return True
 
     async def create_specification(self, data: dict) -> int:
         if self._pool is None:
