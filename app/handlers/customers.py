@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
+from app.services.customer_card_service import build_customer_card
 from app.services.customer_extraction_service import (
     extract_customer_fields_from_response,
     merge_customer_fields,
@@ -19,12 +20,17 @@ from app.services.file_service import (
     is_supported_file,
 )
 from app.services.validation_service import (
+    normalize_date,
+    normalize_department_code,
     normalize_passport,
     normalize_phone,
     normalize_snils,
+    normalize_specification_id,
     normalize_tin,
     validate_email,
+    validate_issued_by,
     validate_name,
+    validate_registration_address,
 )
 from app.states.customer_states import CustomerAddStates, CustomerEditStates
 from app.yadisk_client import YandexDiskClient
@@ -39,10 +45,15 @@ FIELD_LABELS = {
     "first_name": "Изменить Имя",
     "last_name": "Изменить Фамилию",
     "surname": "Изменить Отчество",
+    "by_whom_issued": "Изменить кем выдан",
+    "date_issue": "Изменить дату выдачи",
+    "department_code": "Изменить код подразделения",
+    "registration_address": "Изменить адрес регистрации",
     "ipain": "Изменить СНИЛС",
     "tin": "Изменить ИНН",
     "phone": "Изменить Номер телефона",
     "email": "Изменить email",
+    "specification_id": "Изменить specification_id",
 }
 
 
@@ -172,12 +183,19 @@ async def handle_customer_email(
         "surname": customer_fields.get("surname"),
         "tin": customer_fields.get("tin"),
         "ipain": customer_fields.get("ipain"),
+        "by_whom_issued": customer_fields.get("by_whom_issued"),
+        "date_issue": customer_fields.get("date_issue"),
+        "registration_address": customer_fields.get("registration_address"),
+        "department_code": customer_fields.get("department_code"),
         "phone": data.get("phone"),
         "email": email,
+        "specification_id": None,
     }
     customer = await database.create_customer(customer_data)
     await state.clear()
-    await message.answer(build_customer_created_reply(customer))
+    await message.answer(
+        "✅ Клиент добавлен\n\n" + await build_customer_card(customer, database)
+    )
 
 
 @router.message(Command("search_edit_customer"))
@@ -209,7 +227,7 @@ async def handle_search_passport(
 
     can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
     reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
-    await message.answer(build_customer_card(customer), reply_markup=reply_markup)
+    await message.answer(await build_customer_card(customer, database), reply_markup=reply_markup)
 
 
 @router.callback_query(F.data.startswith("customer_delete:"))
@@ -313,10 +331,30 @@ async def handle_customer_new_value(
         await state.clear()
         return
 
-    normalized, error = _validate_customer_field(field_name, message.text)
-    if error:
-        await message.answer(error)
-        return
+    if field_name == "specification_id":
+        spec_id = normalize_specification_id(message.text)
+        if spec_id is None and (message.text or "").strip().lower() not in {
+            "",
+            "-",
+            "null",
+            "none",
+        }:
+            await message.answer(
+                "Неверный specification_id. Введите положительное число, "
+                "или «-» для очистки."
+            )
+            return
+        if spec_id is not None:
+            specification = await database.get_specification_by_id(spec_id)
+            if not specification:
+                await message.answer("Спецификация с таким ID не найдена")
+                return
+        normalized = spec_id
+    else:
+        normalized, error = _validate_customer_field(field_name, message.text)
+        if error:
+            await message.answer(error)
+            return
 
     if field_name == "passport":
         existing = await database.find_customer_by_passport(normalized)
@@ -327,7 +365,7 @@ async def handle_customer_new_value(
     customer = await database.update_customer(customer_id, field_name, normalized)
     can_edit = await _can_edit_customer(bot, message.chat.id, message.from_user.id)
     reply_markup = _build_customer_action_keyboard(customer["id"]) if can_edit else None
-    await message.answer(build_customer_card(customer), reply_markup=reply_markup)
+    await message.answer(await build_customer_card(customer, database), reply_markup=reply_markup)
     await state.set_state(CustomerEditStates.choosing_action)
 
 
@@ -424,6 +462,8 @@ async def _process_customer_file(
         ("паспорт", "passport"),
         ("СНИЛС", "ipain"),
         ("ИНН", "tin"),
+        ("дата выдачи", "date_issue"),
+        ("код подразделения", "department_code"),
     ):
         value = customer_fields.get(key)
         if value:
@@ -431,28 +471,6 @@ async def _process_customer_file(
 
     found_text = ", ".join(found_parts) if found_parts else "данные пока не найдены"
     await message.reply(f"Файл принят{extraction_note}. Найдено: {found_text}")
-
-
-def build_customer_card(customer: dict) -> str:
-    fio_parts = [
-        customer.get("last_name"),
-        customer.get("first_name"),
-        customer.get("surname"),
-    ]
-    fio = " ".join(part for part in fio_parts if part) or "—"
-    return (
-        f"ID: {customer.get('id')}\n"
-        f"Паспорт: {customer.get('passport') or '—'}\n"
-        f"ФИО: {fio}\n"
-        f"СНИЛС: {customer.get('ipain') or '—'}\n"
-        f"ИНН: {customer.get('tin') or '—'}\n"
-        f"Телефон: {customer.get('phone') or '—'}\n"
-        f"Email: {customer.get('email') or '—'}"
-    )
-
-
-def build_customer_created_reply(customer: dict) -> str:
-    return "✅ Клиент добавлен\n\n" + build_customer_card(customer)
 
 
 def _build_customer_action_keyboard(customer_id: int) -> InlineKeyboardMarkup:
@@ -484,7 +502,7 @@ def _build_customer_field_keyboard(customer_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _validate_customer_field(field_name: str, raw_value: str) -> tuple[str | None, str | None]:
+def _validate_customer_field(field_name: str, raw_value: str) -> tuple[str | int | None, str | None]:
     text = (raw_value or "").strip()
     if field_name == "passport":
         value = normalize_passport(text)
@@ -494,6 +512,24 @@ def _validate_customer_field(field_name: str, raw_value: str) -> tuple[str | Non
     if field_name in {"first_name", "last_name", "surname"}:
         if not validate_name(text):
             return None, "Неверный формат имени. Длина 1–80 символов."
+        return text, None
+    if field_name == "by_whom_issued":
+        if not validate_issued_by(text):
+            return None, "Неверный формат. Длина 1–300 символов."
+        return text, None
+    if field_name == "date_issue":
+        value = normalize_date(text)
+        if not value:
+            return None, "Неверный формат даты. Пример: 01.01.2020"
+        return value, None
+    if field_name == "department_code":
+        value = normalize_department_code(text)
+        if not value:
+            return None, "Неверный формат кода подразделения. Пример: 000-000"
+        return value, None
+    if field_name == "registration_address":
+        if not validate_registration_address(text):
+            return None, "Неверный адрес. Длина 1–500 символов."
         return text, None
     if field_name == "ipain":
         value = normalize_snils(text)

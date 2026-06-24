@@ -142,6 +142,50 @@ CREATE TABLE IF NOT EXISTS contracts (
 );
 """
 
+CREATE_SPECIFICATIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS specifications (
+    id BIGSERIAL PRIMARY KEY,
+    brand TEXT,
+    model TEXT,
+    year TEXT,
+    eng_capacity TEXT,
+    eng_type TEXT,
+    drive TEXT,
+    transmission TEXT,
+    color TEXT,
+    complectation TEXT,
+    mileage TEXT,
+    price TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS by_whom_issued TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_issue TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS registration_address TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS department_code TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS specification_id BIGINT;",
+]
+
+ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL = """
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'customers_specification_id_fkey'
+    ) THEN
+        ALTER TABLE customers
+        ADD CONSTRAINT customers_specification_id_fkey
+        FOREIGN KEY (specification_id)
+        REFERENCES specifications(id)
+        ON DELETE SET NULL;
+    END IF;
+END $$;
+"""
+
 ENSURE_DOCUMENTS_COLUMNS_SQL = [
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;",
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;",
@@ -185,6 +229,7 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_customers_passport ON customers(passport);",
     "CREATE INDEX IF NOT EXISTS idx_contracts_customer_id ON contracts(customer_id);",
     "CREATE INDEX IF NOT EXISTS idx_contracts_car_id ON contracts(car_id);",
+    "CREATE INDEX IF NOT EXISTS idx_customers_specification_id ON customers(specification_id);",
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -268,6 +313,10 @@ class Database:
             await connection.execute(CREATE_CUSTOMERS_TABLE_SQL)
             await connection.execute(CREATE_CARS_TABLE_SQL)
             await connection.execute(CREATE_CONTRACTS_TABLE_SQL)
+            await connection.execute(CREATE_SPECIFICATIONS_TABLE_SQL)
+            for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
+                await connection.execute(statement)
+            await connection.execute(ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL)
             for statement in ENSURE_DOCUMENTS_COLUMNS_SQL:
                 try:
                     await connection.execute(statement)
@@ -702,9 +751,14 @@ class Database:
                     ipain,
                     phone,
                     email,
+                    by_whom_issued,
+                    date_issue,
+                    registration_address,
+                    department_code,
+                    specification_id,
                     created_at,
                     updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
                 RETURNING *;
                 """,
                 data["passport"],
@@ -715,19 +769,54 @@ class Database:
                 data.get("ipain"),
                 data.get("phone"),
                 data.get("email"),
+                data.get("by_whom_issued"),
+                data.get("date_issue"),
+                data.get("registration_address"),
+                data.get("department_code"),
+                data.get("specification_id"),
                 now,
             )
             return _record_to_dict(row)
 
     _CUSTOMER_UPDATABLE_FIELDS = frozenset(
-        {"passport", "first_name", "last_name", "surname", "tin", "ipain", "phone", "email"}
+        {
+            "passport",
+            "first_name",
+            "last_name",
+            "surname",
+            "tin",
+            "ipain",
+            "phone",
+            "email",
+            "by_whom_issued",
+            "date_issue",
+            "registration_address",
+            "department_code",
+            "specification_id",
+        }
+    )
+
+    _SPECIFICATION_UPDATABLE_FIELDS = frozenset(
+        {
+            "brand",
+            "model",
+            "year",
+            "eng_capacity",
+            "eng_type",
+            "drive",
+            "transmission",
+            "color",
+            "complectation",
+            "mileage",
+            "price",
+        }
     )
 
     async def update_customer(
         self,
         customer_id: int,
         field_name: str,
-        value: str | None,
+        value: str | int | None,
     ) -> dict:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
@@ -773,6 +862,132 @@ class Database:
                 customer_id,
             )
             return result.endswith("1")
+
+    async def create_specification(self, data: dict) -> int:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            spec_id = await connection.fetchval(
+                """
+                INSERT INTO specifications (
+                    brand,
+                    model,
+                    year,
+                    eng_capacity,
+                    eng_type,
+                    drive,
+                    transmission,
+                    color,
+                    complectation,
+                    mileage,
+                    price,
+                    created_at,
+                    updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+                RETURNING id;
+                """,
+                data.get("brand"),
+                data.get("model"),
+                data.get("year"),
+                data.get("eng_capacity"),
+                data.get("eng_type"),
+                data.get("drive"),
+                data.get("transmission"),
+                data.get("color"),
+                data.get("complectation"),
+                data.get("mileage"),
+                data.get("price"),
+                now,
+            )
+            return int(spec_id)
+
+    async def get_specification_by_id(self, specification_id: int) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM specifications WHERE id = $1;",
+                specification_id,
+            )
+            return _record_to_dict(row) if row else None
+
+    async def update_specification(
+        self,
+        specification_id: int,
+        field_name: str,
+        value: str | None,
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        if field_name not in self._SPECIFICATION_UPDATABLE_FIELDS:
+            raise ValueError(f"Field {field_name} is not updatable")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                UPDATE specifications
+                SET {field_name} = $2, updated_at = $3
+                WHERE id = $1
+                RETURNING *;
+                """,
+                specification_id,
+                value,
+                datetime.now(timezone.utc),
+            )
+            return _record_to_dict(row)
+
+    async def delete_specification(self, specification_id: int) -> bool:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            result = await connection.execute(
+                "DELETE FROM specifications WHERE id = $1;",
+                specification_id,
+            )
+            return result.endswith("1")
+
+    async def attach_specification_to_customer(
+        self,
+        customer_id: int,
+        specification_id: int,
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customers
+                SET specification_id = $2, updated_at = $3
+                WHERE id = $1
+                RETURNING *;
+                """,
+                customer_id,
+                specification_id,
+                datetime.now(timezone.utc),
+            )
+            return _record_to_dict(row)
+
+    async def detach_specification_from_customer(self, customer_id: int) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customers
+                SET specification_id = NULL, updated_at = $2
+                WHERE id = $1
+                RETURNING *;
+                """,
+                customer_id,
+                datetime.now(timezone.utc),
+            )
+            return _record_to_dict(row)
 
 
 def _record_to_dict(record: asyncpg.Record | None) -> dict:
