@@ -6,8 +6,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
-from app.handlers.customers import _can_edit_customer
-from app.services.customer_card_service import build_specification_created_reply
+from app.handlers.customers import _build_customer_action_keyboard, _can_edit_customer
+from app.services.customer_card_service import (
+    build_customer_card,
+    build_specification_created_reply,
+)
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
     build_specification_edit_keyboard,
@@ -75,7 +78,42 @@ async def handle_edit_customer_specification(
 
     await callback.message.answer(
         format_specification_text(specification),
-        reply_markup=build_specification_edit_keyboard(int(specification["id"])),
+        reply_markup=build_specification_edit_keyboard(
+            int(specification["id"]),
+            customer_id,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("spec_edit_back:"))
+async def handle_spec_edit_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    database: Database,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+
+    if not await _can_edit_customer(
+        bot, callback.message.chat.id, callback.from_user.id
+    ):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    customer_id = int(callback.data.split(":", 1)[1])
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        await callback.answer()
+        return
+
+    await state.set_state(CustomerEditStates.choosing_action)
+    await state.update_data(customer_id=customer_id)
+    await callback.message.answer(
+        await build_customer_card(customer, database),
+        reply_markup=_build_customer_action_keyboard(customer_id),
     )
     await callback.answer()
 
@@ -167,7 +205,10 @@ async def handle_specification_edit_value(
     )
     await message.answer(
         format_specification_text(specification),
-        reply_markup=build_specification_edit_keyboard(int(specification_id)),
+        reply_markup=build_specification_edit_keyboard(
+            int(specification_id),
+            int(customer_id),
+        ),
     )
 
 

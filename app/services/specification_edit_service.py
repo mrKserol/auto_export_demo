@@ -63,7 +63,10 @@ def format_specification_text(specification: dict) -> str:
     )
 
 
-def build_specification_edit_keyboard(specification_id: int) -> InlineKeyboardMarkup:
+def build_specification_edit_keyboard(
+    specification_id: int,
+    customer_id: int,
+) -> InlineKeyboardMarkup:
     buttons = [
         InlineKeyboardButton(
             text=SPEC_EDIT_BUTTON_LABELS[field_name],
@@ -72,6 +75,14 @@ def build_specification_edit_keyboard(specification_id: int) -> InlineKeyboardMa
         for field_name in SPEC_FIELD_ORDER
     ]
     rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"spec_edit_back:{customer_id}",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
