@@ -1,17 +1,174 @@
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
+from app.handlers.customers import _can_edit_customer
 from app.services.customer_card_service import build_specification_created_reply
+from app.services.specification_edit_service import (
+    SPEC_FIELD_LABELS,
+    build_specification_edit_keyboard,
+    format_specification_text,
+    parse_specification_field_value,
+)
 from app.services.validation_service import normalize_passport
-from app.states.specification_states import SpecificationAddStates
+from app.states.customer_states import CustomerEditStates
+from app.states.specification_states import SpecificationAddStates, SpecificationEditStates
 
 
 router = Router(name="specifications")
+
+
+@router.callback_query(F.data.startswith("edit_customer_specification:"))
+async def handle_edit_customer_specification(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    database: Database,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+
+    if not await _can_edit_customer(
+        bot, callback.message.chat.id, callback.from_user.id
+    ):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    customer_id = int(callback.data.split(":", 1)[1])
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        await callback.answer()
+        return
+
+    created = False
+    if not customer.get("specification_id"):
+        specification_id = await database.create_empty_specification()
+        customer = await database.attach_specification_to_customer(
+            customer_id, specification_id
+        )
+        created = True
+
+    specification = await database.get_specification_by_id(
+        int(customer["specification_id"])
+    )
+    if specification is None:
+        await callback.message.answer("Не удалось загрузить спецификацию")
+        await callback.answer()
+        return
+
+    await state.set_state(CustomerEditStates.choosing_field)
+    await state.update_data(
+        customer_id=customer_id,
+        specification_id=int(specification["id"]),
+    )
+
+    if created:
+        await callback.message.answer(
+            "У клиента ещё не было спецификации. "
+            "Я создал пустую спецификацию, теперь можно заполнить поля."
+        )
+
+    await callback.message.answer(
+        format_specification_text(specification),
+        reply_markup=build_specification_edit_keyboard(int(specification["id"])),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edit_spec_field:"))
+async def handle_edit_spec_field(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    database: Database,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+
+    if not await _can_edit_customer(
+        bot, callback.message.chat.id, callback.from_user.id
+    ):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    _, specification_id_str, field_name = callback.data.split(":", 2)
+    specification_id = int(specification_id_str)
+
+    data = await state.get_data()
+    customer_id = data.get("customer_id")
+    if not customer_id:
+        await callback.message.answer(
+            "Сессия редактирования устарела. Начните с /search_edit_customer"
+        )
+        await callback.answer()
+        return
+
+    customer = await database.get_customer_by_id(int(customer_id))
+    if not customer or int(customer.get("specification_id") or 0) != specification_id:
+        await callback.message.answer("Спецификация не принадлежит этому клиенту")
+        await callback.answer()
+        return
+
+    if field_name not in SPEC_FIELD_LABELS:
+        await callback.answer("Неизвестное поле", show_alert=True)
+        return
+
+    await state.set_state(SpecificationEditStates.waiting_new_value)
+    await state.update_data(
+        customer_id=int(customer_id),
+        specification_id=specification_id,
+        field_name=field_name,
+    )
+    await callback.message.answer(
+        f"Введите новое значение для поля: {SPEC_FIELD_LABELS[field_name]}"
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(SpecificationEditStates.waiting_new_value), F.text)
+async def handle_specification_edit_value(
+    message: Message,
+    state: FSMContext,
+    database: Database,
+) -> None:
+    data = await state.get_data()
+    customer_id = data.get("customer_id")
+    specification_id = data.get("specification_id")
+    field_name = data.get("field_name")
+    if not customer_id or not specification_id or not field_name:
+        await message.answer("Сессия редактирования устарела. Начните с /search_edit_customer")
+        await state.clear()
+        return
+
+    value, error = parse_specification_field_value(field_name, message.text)
+    if error:
+        await message.answer(error)
+        return
+
+    await database.update_specification(int(specification_id), field_name, value)
+    specification = await database.get_specification_by_id(int(specification_id))
+    if specification is None:
+        await message.answer("Не удалось загрузить обновлённую спецификацию")
+        await state.clear()
+        return
+
+    await state.set_state(CustomerEditStates.choosing_field)
+    await state.update_data(
+        customer_id=customer_id,
+        specification_id=specification_id,
+    )
+    await message.answer(
+        f"✅ Поле обновлено: {SPEC_FIELD_LABELS[field_name]} = {value}"
+    )
+    await message.answer(
+        format_specification_text(specification),
+        reply_markup=build_specification_edit_keyboard(int(specification_id)),
+    )
 
 
 @router.message(Command("add_specification"))

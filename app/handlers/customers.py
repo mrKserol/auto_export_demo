@@ -25,7 +25,6 @@ from app.services.validation_service import (
     normalize_passport,
     normalize_phone,
     normalize_snils,
-    normalize_specification_id,
     normalize_tin,
     validate_email,
     validate_issued_by,
@@ -53,7 +52,6 @@ FIELD_LABELS = {
     "tin": "Изменить ИНН",
     "phone": "Изменить Номер телефона",
     "email": "Изменить email",
-    "specification_id": "Изменить specification_id",
 }
 
 
@@ -331,30 +329,10 @@ async def handle_customer_new_value(
         await state.clear()
         return
 
-    if field_name == "specification_id":
-        spec_id = normalize_specification_id(message.text)
-        if spec_id is None and (message.text or "").strip().lower() not in {
-            "",
-            "-",
-            "null",
-            "none",
-        }:
-            await message.answer(
-                "Неверный specification_id. Введите положительное число, "
-                "или «-» для очистки."
-            )
-            return
-        if spec_id is not None:
-            specification = await database.get_specification_by_id(spec_id)
-            if not specification:
-                await message.answer("Спецификация с таким ID не найдена")
-                return
-        normalized = spec_id
-    else:
-        normalized, error = _validate_customer_field(field_name, message.text)
-        if error:
-            await message.answer(error)
-            return
+    normalized, error = _validate_customer_field(field_name, message.text)
+    if error:
+        await message.answer(error)
+        return
 
     if field_name == "passport":
         existing = await database.find_customer_by_passport(normalized)
@@ -498,6 +476,12 @@ def _build_customer_field_keyboard(customer_id: int) -> InlineKeyboardMarkup:
         )
         for field_name, label in FIELD_LABELS.items()
     ]
+    buttons.append(
+        InlineKeyboardButton(
+            text="Изменить спецификацию авто",
+            callback_data=f"edit_customer_specification:{customer_id}",
+        )
+    )
     rows = [[button] for button in buttons]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

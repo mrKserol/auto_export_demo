@@ -903,6 +903,9 @@ class Database:
             )
             return int(spec_id)
 
+    async def create_empty_specification(self) -> int:
+        return await self.create_specification({})
+
     async def get_specification_by_id(self, specification_id: int) -> dict | None:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")

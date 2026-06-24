@@ -15,3 +15,7 @@ class SpecificationAddStates(StatesGroup):
     waiting_mileage = State()
     waiting_price = State()
     confirm_replace = State()
+
+
+class SpecificationEditStates(StatesGroup):
+    waiting_new_value = State()

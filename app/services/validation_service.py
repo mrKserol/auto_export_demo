@@ -106,3 +106,39 @@ def validate_issued_by(value: str | None) -> bool:
         return False
     text = value.strip()
     return 1 <= len(text) <= 300
+
+
+def _validate_text_length(value: str, min_len: int, max_len: int) -> bool:
+    return min_len <= len(value.strip()) <= max_len
+
+
+def validate_specification_field(
+    field_name: str,
+    raw_value: str | None,
+) -> tuple[str | None, str | None]:
+    text = (raw_value or "").strip()
+    if field_name in {"brand", "model", "eng_type", "drive", "transmission", "color"}:
+        if not _validate_text_length(text, 1, 80):
+            return None, f"Неверное значение. Длина 1–80 символов."
+        return text, None
+    if field_name == "year":
+        if not re.fullmatch(r"\d{4}", text):
+            return None, "Неверный год. Пример: 2026"
+        return text, None
+    if field_name == "eng_capacity":
+        if not _validate_text_length(text, 1, 30):
+            return None, "Неверный объём. Пример: 1.5, 2.0, электро"
+        return text, None
+    if field_name == "complectation":
+        if not _validate_text_length(text, 1, 200):
+            return None, "Неверная комплектация. Длина 1–200 символов."
+        return text, None
+    if field_name == "mileage":
+        if not _validate_text_length(text, 1, 50):
+            return None, "Неверный пробег. Пример: до 50 000 км, 0, без пробега"
+        return text, None
+    if field_name == "price":
+        if not _validate_text_length(text, 1, 80):
+            return None, "Неверный бюджет. Пример: 95500, до 100000 CNY"
+        return text, None
+    return None, "Неизвестное поле спецификации"

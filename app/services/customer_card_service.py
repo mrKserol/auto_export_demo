@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.database import Database
+from app.services.specification_edit_service import format_specification_text
 
 
 def format_customer_fio(customer: dict) -> str:
@@ -23,20 +24,7 @@ async def build_specification_block(
     if not specification:
         return "Желаемый автомобиль: не заполнен"
 
-    return (
-        "Желаемый автомобиль:\n"
-        f"Марка: {specification.get('brand') or '—'}\n"
-        f"Модель: {specification.get('model') or '—'}\n"
-        f"Год: {specification.get('year') or '—'}\n"
-        f"Объём: {specification.get('eng_capacity') or '—'}\n"
-        f"Тип ДВС: {specification.get('eng_type') or '—'}\n"
-        f"Привод: {specification.get('drive') or '—'}\n"
-        f"КПП: {specification.get('transmission') or '—'}\n"
-        f"Цвет: {specification.get('color') or '—'}\n"
-        f"Комплектация: {specification.get('complectation') or '—'}\n"
-        f"Пробег: {specification.get('mileage') or '—'}\n"
-        f"Бюджет: {specification.get('price') or '—'}"
-    )
+    return format_specification_text(specification)
 
 
 async def build_customer_card(customer: dict, database: Database) -> str:
