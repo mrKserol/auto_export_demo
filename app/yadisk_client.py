@@ -9,6 +9,8 @@ import aiohttp
 
 YANDEX_DISK_API_URL = "https://cloud-api.yandex.net/v1/disk/resources"
 INTAKE_FOLDER = "01_Входящие_Telegram"
+CUSTOMERS_FOLDER = "02_Клиенты"
+CUSTOMERS_INTAKE_SUBFOLDER = "01_Входящие"
 CASES_FOLDER = "03_Сделки"
 
 
@@ -122,6 +124,18 @@ class YandexDiskClient:
 
     def build_file_path(self, chat_id: int, message_id: int, file_name: str) -> str:
         return self.build_intake_file_path(file_name)
+
+    def build_customer_intake_file_path(
+        self,
+        telegram_user_id: int,
+        file_name: str,
+        intake_date: date | None = None,
+    ) -> str:
+        current_date = intake_date or date.today()
+        return (
+            f"{self.base_path}/{CUSTOMERS_FOLDER}/{CUSTOMERS_INTAKE_SUBFOLDER}/"
+            f"{current_date.isoformat()}/{telegram_user_id}/{file_name}"
+        )
 
     @staticmethod
     def _normalize_path(path: str) -> str:

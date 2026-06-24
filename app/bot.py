@@ -5,10 +5,13 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import Settings
 from app.database import Database
+from app.handlers.customers import router as customers_router
 from app.handlers.documents import router as documents_router
+from app.handlers.recognize import router as recognize_router
 from app.handlers.start import router as start_router
 from app.yadisk_client import YandexDiskClient
 from app.yandex_function_client import YandexFunctionClient
@@ -22,8 +25,10 @@ def create_bot(settings: Settings) -> Bot:
 
 
 def create_dispatcher() -> Dispatcher:
-    dispatcher = Dispatcher()
+    dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    dispatcher.include_router(customers_router)
+    dispatcher.include_router(recognize_router)
     dispatcher.include_router(documents_router)
     return dispatcher
 

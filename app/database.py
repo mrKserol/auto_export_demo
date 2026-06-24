@@ -94,6 +94,54 @@ CREATE TABLE IF NOT EXISTS case_checks (
 );
 """
 
+CREATE_CUSTOMERS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS customers (
+    id BIGSERIAL PRIMARY KEY,
+    passport TEXT UNIQUE NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
+    surname TEXT,
+    tin TEXT,
+    ipain TEXT,
+    phone TEXT,
+    email TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+CREATE_CARS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS cars (
+    id BIGSERIAL PRIMARY KEY,
+    vin TEXT UNIQUE,
+    brand TEXT,
+    model TEXT,
+    color TEXT,
+    category TEXT,
+    engine_num TEXT,
+    date TEXT,
+    eng_capacity TEXT,
+    hp TEXT,
+    type TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+CREATE_CONTRACTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS contracts (
+    id BIGSERIAL PRIMARY KEY,
+    customer_id BIGINT REFERENCES customers(id),
+    car_id BIGINT REFERENCES cars(id),
+    invoice TEXT,
+    epts TEXT,
+    invoice_date TEXT,
+    epts_date TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 ENSURE_DOCUMENTS_COLUMNS_SQL = [
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;",
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT;",
@@ -134,6 +182,9 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_cases_vin ON cases(vin);",
     "CREATE INDEX IF NOT EXISTS idx_cases_contract_number ON cases(contract_number);",
     "CREATE INDEX IF NOT EXISTS idx_cases_invoice_number ON cases(invoice_number);",
+    "CREATE INDEX IF NOT EXISTS idx_customers_passport ON customers(passport);",
+    "CREATE INDEX IF NOT EXISTS idx_contracts_customer_id ON contracts(customer_id);",
+    "CREATE INDEX IF NOT EXISTS idx_contracts_car_id ON contracts(car_id);",
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -214,6 +265,9 @@ class Database:
             await connection.execute(CREATE_DOCUMENTS_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_FIELDS_TABLE_SQL)
             await connection.execute(CREATE_CASE_CHECKS_TABLE_SQL)
+            await connection.execute(CREATE_CUSTOMERS_TABLE_SQL)
+            await connection.execute(CREATE_CARS_TABLE_SQL)
+            await connection.execute(CREATE_CONTRACTS_TABLE_SQL)
             for statement in ENSURE_DOCUMENTS_COLUMNS_SQL:
                 try:
                     await connection.execute(statement)
@@ -605,6 +659,120 @@ class Database:
                 case_id,
             )
             return [str(row["field_value"]) for row in rows]
+
+    async def find_customer_by_passport(self, passport: str) -> dict | None:
+        return await self.search_customer_by_passport(passport)
+
+    async def search_customer_by_passport(self, passport: str) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM customers WHERE passport = $1;",
+                passport,
+            )
+            return _record_to_dict(row) if row else None
+
+    async def get_customer_by_id(self, customer_id: int) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM customers WHERE id = $1;",
+                customer_id,
+            )
+            return _record_to_dict(row) if row else None
+
+    async def create_customer(self, data: dict) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO customers (
+                    passport,
+                    first_name,
+                    last_name,
+                    surname,
+                    tin,
+                    ipain,
+                    phone,
+                    email,
+                    created_at,
+                    updated_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                RETURNING *;
+                """,
+                data["passport"],
+                data.get("first_name"),
+                data.get("last_name"),
+                data.get("surname"),
+                data.get("tin"),
+                data.get("ipain"),
+                data.get("phone"),
+                data.get("email"),
+                now,
+            )
+            return _record_to_dict(row)
+
+    _CUSTOMER_UPDATABLE_FIELDS = frozenset(
+        {"passport", "first_name", "last_name", "surname", "tin", "ipain", "phone", "email"}
+    )
+
+    async def update_customer(
+        self,
+        customer_id: int,
+        field_name: str,
+        value: str | None,
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        if field_name not in self._CUSTOMER_UPDATABLE_FIELDS:
+            raise ValueError(f"Field {field_name} is not updatable")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                UPDATE customers
+                SET {field_name} = $2, updated_at = $3
+                WHERE id = $1
+                RETURNING *;
+                """,
+                customer_id,
+                value,
+                datetime.now(timezone.utc),
+            )
+            return _record_to_dict(row)
+
+    async def count_contracts_for_customer(self, customer_id: int) -> int:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            count = await connection.fetchval(
+                "SELECT COUNT(*) FROM contracts WHERE customer_id = $1;",
+                customer_id,
+            )
+            return int(count)
+
+    async def delete_customer_if_no_contracts(self, customer_id: int) -> bool:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        contract_count = await self.count_contracts_for_customer(customer_id)
+        if contract_count > 0:
+            return False
+
+        async with self._pool.acquire() as connection:
+            result = await connection.execute(
+                "DELETE FROM customers WHERE id = $1;",
+                customer_id,
+            )
+            return result.endswith("1")
 
 
 def _record_to_dict(record: asyncpg.Record | None) -> dict:
