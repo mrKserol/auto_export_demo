@@ -291,6 +291,39 @@ async def handle_customer_edit_menu(
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("customer_edit_back:"))
+async def handle_customer_edit_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    database: Database,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+
+    can_edit = await _can_edit_customer(
+        bot, callback.message.chat.id, callback.from_user.id
+    )
+    if not can_edit:
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    customer_id = int(callback.data.split(":", 1)[1])
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        await callback.answer()
+        return
+
+    await state.set_state(CustomerEditStates.choosing_action)
+    await state.update_data(customer_id=customer_id)
+    await callback.message.answer(
+        await build_customer_card(customer, database),
+        reply_markup=_build_customer_action_keyboard(customer_id),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("customer_edit_field:"))
 async def handle_customer_edit_field(
     callback: CallbackQuery,
@@ -480,6 +513,12 @@ def _build_customer_field_keyboard(customer_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text="Изменить спецификацию авто",
             callback_data=f"edit_customer_specification:{customer_id}",
+        )
+    )
+    buttons.append(
+        InlineKeyboardButton(
+            text="Назад",
+            callback_data=f"customer_edit_back:{customer_id}",
         )
     )
     rows = [[button] for button in buttons]
