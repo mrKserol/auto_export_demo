@@ -58,6 +58,14 @@ OCR текст документа:
 - Извлекай только данные главной страницы паспорта.
 - Паспорт храни в формате "80 06 035956".
 - Серия паспорта — 4 цифры, номер — 6 цифр.
+- В паспорте РФ серия и номер часто напечатаны красными цифрами вертикально справа на обеих страницах.
+- Серия состоит из 4 цифр, часто отображается как две пары: 80 и 23.
+- Номер состоит из 6 цифр, например 694346.
+- Если OCR видит рядом или построчно три числовых блока 80, 23, 694346, это может быть паспорт: 80 23 694346.
+- Не путай номер паспорта с ИНН, СНИЛС, датой рождения, датой выдачи или кодом подразделения.
+- Код подразделения имеет формат 000-000, это НЕ номер паспорта.
+- Дата выдачи имеет формат DD.MM.YYYY, это НЕ номер паспорта.
+- Если на правом краю страницы есть повторяющиеся красные цифры, используй их как источник серии и номера паспорта.
 - Код подразделения в формате "000-000".
 - Дата выдачи в формате DD.MM.YYYY.
 - Не придумывай данные.
@@ -550,11 +558,21 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
             fields[key] = value
 
     if not fields["passport"]:
+        fields["passport"] = _extract_passport_from_vertical_or_side_numbers(ocr_text)
+
+    if not fields["passport"]:
         passport_match = re.search(r"\b(\d{2})\s*(\d{2})\s*(\d{6})\b", ocr_text)
         if passport_match:
             fields["passport"] = normalize_passport(
                 f"{passport_match.group(1)}{passport_match.group(2)}{passport_match.group(3)}"
             )
+
+    if not fields["passport"]:
+        numeric_tokens = _collect_numeric_tokens_from_ocr(ocr_text)
+        logger.warning(
+            "Passport number not found. digit_tokens=%s",
+            _mask_digit_tokens_for_log(numeric_tokens),
+        )
 
     if not fields["department_code"]:
         code_match = re.search(r"\b\d{3}-\d{3}\b", ocr_text)
@@ -565,6 +583,224 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         fields["date_issue"] = normalize_date(ocr_text)
 
     return {key: value for key, value in fields.items() if value}
+
+
+_PASSPORT_CONTEXT_KEYWORDS = (
+    "РОССИЙСКАЯ ФЕДЕРАЦИЯ",
+    "ПАСПОРТ",
+    "КОД ПОДРАЗДЕЛЕНИЯ",
+    "ДАТА ВЫДАЧИ",
+)
+
+_EXCLUDED_LINE_KEYWORDS = (
+    "ВЫДАЧ",
+    "РОЖДЕН",
+    "КОД",
+    "ПОДРАЗДЕЛ",
+    "ИНН",
+    "СНИЛС",
+    "СТРАХОВ",
+)
+
+
+def _extract_passport_from_vertical_or_side_numbers(ocr_text: str) -> str | None:
+    """
+    Ищет серию и номер паспорта РФ, если OCR прочитал вертикальный номер
+    отдельными строками, например:
+    80
+    23
+    694346
+    """
+    if not ocr_text:
+        return None
+
+    token_entries = _collect_numeric_token_entries_from_ocr(ocr_text)
+    if not token_entries:
+        return None
+
+    candidates: list[tuple[str, int, int]] = []
+    seen_digits: set[str] = set()
+
+    def add_candidate(digits10: str, line_idx: int) -> None:
+        normalized = normalize_passport(digits10)
+        if not normalized or digits10 in seen_digits:
+            return
+        if _is_excluded_passport_digits(digits10, ocr_text):
+            return
+        seen_digits.add(digits10)
+        candidates.append((digits10, line_idx, 0))
+
+    for line_idx, token in token_entries:
+        if len(token) == 10:
+            add_candidate(token, line_idx)
+
+    tokens_only = [token for _, token in token_entries]
+    line_indices = [line_idx for line_idx, _ in token_entries]
+    token_count = len(tokens_only)
+    for index in range(token_count):
+        t0 = tokens_only[index]
+        line_idx = line_indices[index]
+
+        if index + 2 < token_count:
+            t1, t2 = tokens_only[index + 1], tokens_only[index + 2]
+            if len(t0) == 2 and len(t1) == 2 and len(t2) == 6:
+                add_candidate(f"{t0}{t1}{t2}", line_idx)
+            if len(t0) == 4 and len(t1) == 6:
+                add_candidate(f"{t0}{t1}", line_idx)
+
+        if index + 3 < token_count:
+            t1, t2, t3 = tokens_only[index + 1], tokens_only[index + 2], tokens_only[index + 3]
+            if len(t0) == 2 and len(t1) == 2 and len(t2) == 2 and len(t3) == 4:
+                add_candidate(f"{t0}{t1}{t2}{t3}", line_idx)
+
+    lines = ocr_text.splitlines()
+    for line_idx, line in enumerate(lines):
+        upper_line = line.upper().replace("Ё", "Е")
+        if any(keyword in upper_line for keyword in _EXCLUDED_LINE_KEYWORDS):
+            continue
+        for match in re.finditer(r"(?<!\d)(\d{10})(?!\d)", line):
+            add_candidate(match.group(1), line_idx)
+
+    if not candidates:
+        return None
+
+    occurrence_counts: dict[str, int] = {}
+    digits_only_ocr = re.sub(r"\D", "", ocr_text)
+    for digits10, _, _ in candidates:
+        occurrence_counts[digits10] = digits_only_ocr.count(digits10)
+
+    scored: list[tuple[int, str]] = []
+    for digits10, line_idx, _ in candidates:
+        score = _score_passport_candidate(
+            digits10,
+            ocr_text,
+            line_idx=line_idx,
+            occurrence_count=occurrence_counts.get(digits10, 1),
+        )
+        if score > 0:
+            scored.append((score, digits10))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return normalize_passport(scored[0][1])
+
+
+def _collect_numeric_token_entries_from_ocr(ocr_text: str) -> list[tuple[int, str]]:
+    entries: list[tuple[int, str]] = []
+    for line_idx, line in enumerate(ocr_text.splitlines()):
+        for token in re.findall(r"\d+", line):
+            if len(token) in {2, 4, 6, 10}:
+                entries.append((line_idx, token))
+    return entries
+
+
+def _collect_numeric_tokens_from_ocr(ocr_text: str) -> list[str]:
+    return [token for _, token in _collect_numeric_token_entries_from_ocr(ocr_text)]
+
+
+def _mask_digit_tokens_for_log(tokens: list[str]) -> list[str]:
+    masked: list[str] = []
+    for token in tokens:
+        if len(token) <= 2:
+            masked.append(token)
+        elif len(token) == 6:
+            masked.append("******")
+        else:
+            masked.append("*" * len(token))
+    return masked
+
+
+def _is_excluded_passport_digits(digits10: str, ocr_text: str) -> bool:
+    if len(digits10) != 10:
+        return True
+
+    for date_match in re.finditer(r"\b(\d{2})[./](\d{2})[./](\d{4})\b", ocr_text):
+        date_digits = "".join(date_match.groups())
+        if digits10 == date_digits:
+            return True
+
+    for code_match in re.finditer(r"\b(\d{3})-(\d{3})\b", ocr_text):
+        code_digits = "".join(code_match.groups())
+        if digits10 == code_digits:
+            return True
+
+    for inn_match in re.finditer(r"(?<!\d)(\d{12})(?!\d)", ocr_text):
+        if digits10 in inn_match.group(1):
+            return True
+
+    for snils_match in re.finditer(
+        r"\b(\d{3})[-\s]?(\d{3})[-\s]?(\d{3})[-\s]?(\d{2})\b",
+        ocr_text,
+    ):
+        snils_digits = "".join(snils_match.groups())
+        if len(snils_digits) == 11 and digits10 in snils_digits:
+            return True
+
+    position = ocr_text.find(digits10)
+    if position != -1:
+        context = ocr_text[max(0, position - 40) : position + len(digits10) + 40]
+        context_upper = context.upper().replace("Ё", "Е")
+        if any(keyword in context_upper for keyword in ("ИНН", "СНИЛС", "СТРАХОВ")):
+            return True
+
+    return False
+
+
+def _score_passport_candidate(
+    digits10: str,
+    ocr_text: str,
+    *,
+    line_idx: int,
+    occurrence_count: int,
+) -> int:
+    if len(digits10) != 10:
+        return -100
+
+    score = 0
+    upper_text = ocr_text.upper().replace("Ё", "Е")
+    if any(keyword in upper_text for keyword in _PASSPORT_CONTEXT_KEYWORDS):
+        score += 5
+
+    if occurrence_count > 1:
+        score += 5
+
+    lines = ocr_text.splitlines()
+    if 0 <= line_idx < len(lines):
+        line = lines[line_idx].strip()
+        line_digits = re.sub(r"\D", "", line)
+        if line and line_digits and len(line_digits) / len(line) >= 0.5:
+            score += 3
+
+    score += 2
+
+    for date_match in re.finditer(r"\b(\d{2})[./](\d{2})[./](\d{4})\b", ocr_text):
+        date_digits = "".join(date_match.groups())
+        if digits10 == date_digits:
+            score -= 10
+
+    for code_match in re.finditer(r"\b(\d{3})-(\d{3})\b", ocr_text):
+        code_digits = "".join(code_match.groups())
+        if digits10 == code_digits:
+            score -= 10
+
+    for inn_match in re.finditer(r"(?<!\d)(\d{12})(?!\d)", ocr_text):
+        if digits10 in inn_match.group(1):
+            score -= 10
+
+    for snils_match in re.finditer(
+        r"\b(\d{3})[-\s]?(\d{3})[-\s]?(\d{3})[-\s]?(\d{2})\b",
+        ocr_text,
+    ):
+        snils_digits = "".join(snils_match.groups())
+        if len(snils_digits) == 11 and digits10 in snils_digits:
+            score -= 10
+
+    if _is_excluded_passport_digits(digits10, ocr_text):
+        score -= 10
+
+    return score
 
 
 def _postprocess_passport_registration(
