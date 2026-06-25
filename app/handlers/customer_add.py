@@ -26,6 +26,7 @@ from app.services.file_service import (
     get_original_filename,
 )
 from app.services.validation_service import (
+    normalize_passport,
     normalize_phone,
     normalize_snils,
     normalize_tin,
@@ -113,14 +114,73 @@ async def handle_passport_main_upload(
         return
 
     await state.update_data(customer_fields=fields)
-    await state.set_state(CustomerAddStates.waiting_registration)
+    await state.set_state(CustomerAddStates.waiting_passport_confirmation)
     await message.answer(
-        "✅ Паспорт распознан.\n\n"
+        "Паспорт распознан.\n\n"
         f"Паспорт: {fields.get('passport') or '—'}\n"
         f"ФИО: {format_customer_fio(fields)}\n"
         f"Кем выдан: {fields.get('by_whom_issued') or '—'}\n"
         f"Дата выдачи: {fields.get('date_issue') or '—'}\n"
         f"Код подразделения: {fields.get('department_code') or '—'}\n\n"
+        "Проверьте данные паспорта.",
+        reply_markup=_passport_confirmation_keyboard(),
+    )
+
+
+@router.callback_query(
+    StateFilter(CustomerAddStates.waiting_passport_confirmation),
+    F.data == "add_customer_passport:confirm",
+)
+async def handle_passport_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+
+    data = await state.get_data()
+    customer_fields = dict(data.get("customer_fields") or {})
+    if not customer_fields.get("passport"):
+        await callback.message.answer("Не хватает данных паспорта. Начните с /add_customer")
+        await state.clear()
+        await callback.answer()
+        return
+
+    await state.set_state(CustomerAddStates.waiting_registration)
+    await callback.message.answer(
+        "Шаг 2 из 4.\n"
+        "Отправьте ОДИН файл: страницу паспорта с регистрацией.\n"
+        "Не отправляйте сейчас СНИЛС или ИНН."
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(CustomerAddStates.waiting_passport_confirmation),
+    F.data == "add_customer_passport:edit_number",
+)
+async def handle_passport_edit_number_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+
+    await state.set_state(CustomerAddStates.waiting_manual_passport_number)
+    await callback.message.answer(
+        "Введите правильный номер паспорта в формате:\n80 23 694346"
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter(CustomerAddStates.waiting_manual_passport_number), F.text)
+async def handle_manual_passport_number(message: Message, state: FSMContext) -> None:
+    passport = normalize_passport(message.text)
+    if not passport:
+        await message.answer("Неверный формат паспорта. Пример: 80 23 694346")
+        return
+
+    data = await state.get_data()
+    customer_fields = dict(data.get("customer_fields") or {})
+    customer_fields["passport"] = passport
+    await state.update_data(customer_fields=customer_fields)
+    await state.set_state(CustomerAddStates.waiting_registration)
+    await message.answer(
+        f"Паспорт исправлен: {passport}\n\n"
         "Шаг 2 из 4.\n"
         "Отправьте ОДИН файл: страницу паспорта с регистрацией.\n"
         "Не отправляйте сейчас СНИЛС или ИНН."
@@ -656,6 +716,25 @@ def _format_document_type_mismatch_message(
         f"Похоже, это не {expected_label}.\n"
         f"Сейчас нужен: один файл — {expected_label}.\n"
         f"Обнаружено: {detected_label}."
+    )
+
+
+def _passport_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Данные верны",
+                    callback_data="add_customer_passport:confirm",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Исправить номер паспорта",
+                    callback_data="add_customer_passport:edit_number",
+                )
+            ],
+        ]
     )
 
 

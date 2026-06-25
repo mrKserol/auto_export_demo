@@ -3,6 +3,8 @@ from aiogram.fsm.state import State, StatesGroup
 
 class CustomerAddStates(StatesGroup):
     waiting_passport_main = State()
+    waiting_passport_confirmation = State()
+    waiting_manual_passport_number = State()
     waiting_registration = State()
     waiting_snils = State()
     waiting_tin = State()
