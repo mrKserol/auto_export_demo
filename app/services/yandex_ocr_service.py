@@ -175,6 +175,20 @@ REGISTRATION_OCR_KEYWORDS = {
     "Г.": 1,
 }
 
+PASSPORT_MAIN_OCR_KEYWORDS = {
+    "РОССИЙСКАЯ ФЕДЕРАЦИЯ": 5,
+    "ПАСПОРТ": 5,
+    "ПАСПОРТ ВЫДАН": 5,
+    "ДАТА ВЫДАЧИ": 4,
+    "КОД ПОДРАЗДЕЛЕНИЯ": 4,
+    "ФАМИЛИЯ": 3,
+    "ИМЯ": 3,
+    "ОТЧЕСТВО": 3,
+    "ДАТА РОЖДЕНИЯ": 3,
+    "PNRUS": 2,
+    "RUS": 1,
+}
+
 
 def _prepare_rotated_image_bytes_candidates(
     file_content: bytes,
@@ -191,17 +205,44 @@ def _prepare_rotated_image_bytes_candidates(
 
 
 def _score_ocr_text(text: str, score_profile: str) -> float:
-    if score_profile != "registration":
-        return float(len(text))
+    if score_profile == "registration":
+        upper_text = text.upper()
+        score = sum(
+            weight for keyword, weight in REGISTRATION_OCR_KEYWORDS.items() if keyword in upper_text
+        )
+        score += min(len(text) / 100, 20)
+        if len(text) < 30:
+            score *= 0.2
+        return score
 
-    upper_text = text.upper()
-    score = sum(
-        weight for keyword, weight in REGISTRATION_OCR_KEYWORDS.items() if keyword in upper_text
-    )
-    score += min(len(text) / 100, 20)
-    if len(text) < 30:
-        score *= 0.2
-    return score
+    if score_profile == "passport_main":
+        upper_text = text.upper().replace("Ё", "Е")
+        score = sum(
+            weight for keyword, weight in PASSPORT_MAIN_OCR_KEYWORDS.items() if keyword in upper_text
+        )
+        if _has_passport_side_number_pattern(text):
+            score += 10
+        score += min(len(text) / 100, 20)
+        if len(text) < 30:
+            score *= 0.2
+        return score
+
+    return float(len(text))
+
+
+def _has_passport_side_number_pattern(text: str) -> bool:
+    tokens: list[str] = []
+    for line in text.splitlines():
+        tokens.extend(re.findall(r"\d+", line))
+
+    for index in range(len(tokens) - 2):
+        if (
+            re.fullmatch(r"\d{2}", tokens[index])
+            and re.fullmatch(r"\d{2}", tokens[index + 1])
+            and re.fullmatch(r"\d{6}", tokens[index + 2])
+        ):
+            return True
+    return False
 
 
 def _resolve_mime_type(
