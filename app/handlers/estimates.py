@@ -19,11 +19,19 @@ from app.states.estimate_states import EstimateStates
 router = Router(name="estimates")
 
 INVALID_NUMBER_REPLY = "Введите число, например 110"
-INVALID_INSPECT_TRANSPORT_REPLY = "Введите положительное число или 0."
+INVALID_NON_NEGATIVE_REPLY = "Введите положительное число или 0."
 EXCHANGE_RATE_PROMPT = (
     "Введите курс валюты к рублю. Например: 12.1 для CNY или 0.57 для JPY."
 )
 INSPECT_TRANSPORT_PROMPT = "Введите стоимость осмотра и транспортировки в КНР"
+TRANSIT_DECLARATION_PROMPT = (
+    "Введите стоимость приемки в РК и оформление транзитной декларации "
+    "в республике Казахстан."
+)
+INSURANCE_SHIPMENT_PROMPT = "Введите стоимость страхования и доставки до города назначения"
+CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки"
+CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя"
+SESSION_EXPIRED_REPLY = "Сессия устарела. Начните создание сметы заново."
 
 
 @router.callback_query(F.data.startswith("estimate:create:"))
@@ -110,32 +118,86 @@ async def handle_estimate_exchange_rate(message: Message, state: FSMContext) -> 
 
 
 @router.message(StateFilter(EstimateStates.waiting_inspect_transport_price), F.text)
-async def handle_estimate_inspect_transport_price(
+async def handle_estimate_inspect_transport_price(message: Message, state: FSMContext) -> None:
+    inspect_transport_price = parse_non_negative_decimal(message.text)
+    if inspect_transport_price is None:
+        await message.answer(INVALID_NON_NEGATIVE_REPLY)
+        return
+
+    await state.update_data(inspect_transport_price=str(inspect_transport_price))
+    await state.set_state(EstimateStates.waiting_transit_declaration_price)
+    await message.answer(TRANSIT_DECLARATION_PROMPT)
+
+
+@router.message(StateFilter(EstimateStates.waiting_transit_declaration_price), F.text)
+async def handle_estimate_transit_declaration_price(message: Message, state: FSMContext) -> None:
+    transit_declaration_price = parse_non_negative_decimal(message.text)
+    if transit_declaration_price is None:
+        await message.answer(INVALID_NON_NEGATIVE_REPLY)
+        return
+
+    await state.update_data(transit_declaration_price=str(transit_declaration_price))
+    await state.set_state(EstimateStates.waiting_insurance_shipment)
+    await message.answer(INSURANCE_SHIPMENT_PROMPT)
+
+
+@router.message(StateFilter(EstimateStates.waiting_insurance_shipment), F.text)
+async def handle_estimate_insurance_shipment(message: Message, state: FSMContext) -> None:
+    insurance_shipment = parse_non_negative_decimal(message.text)
+    if insurance_shipment is None:
+        await message.answer(INVALID_NON_NEGATIVE_REPLY)
+        return
+
+    await state.update_data(insurance_shipment=str(insurance_shipment))
+    await state.set_state(EstimateStates.waiting_custom_clearing)
+    await message.answer(CUSTOM_CLEARING_PROMPT)
+
+
+@router.message(StateFilter(EstimateStates.waiting_custom_clearing), F.text)
+async def handle_estimate_custom_clearing(message: Message, state: FSMContext) -> None:
+    custom_clearing = parse_non_negative_decimal(message.text)
+    if custom_clearing is None:
+        await message.answer(INVALID_NON_NEGATIVE_REPLY)
+        return
+
+    await state.update_data(custom_clearing=str(custom_clearing))
+    await state.set_state(EstimateStates.waiting_contractor_comission)
+    await message.answer(CONTRACTOR_COMISSION_PROMPT)
+
+
+@router.message(StateFilter(EstimateStates.waiting_contractor_comission), F.text)
+async def handle_estimate_contractor_comission(
     message: Message,
     state: FSMContext,
     database: Database,
 ) -> None:
-    inspect_transport_price = parse_non_negative_decimal(message.text)
-    if inspect_transport_price is None:
-        await message.answer(INVALID_INSPECT_TRANSPORT_REPLY)
+    contractor_comission = parse_non_negative_decimal(message.text)
+    if contractor_comission is None:
+        await message.answer(INVALID_NON_NEGATIVE_REPLY)
         return
 
     data = await state.get_data()
     customer_id = data.get("customer_id")
     specification_id = data.get("specification_id")
-    engine_power_text = data.get("engine_power")
-    exchange_rate_text = data.get("exchange_rate")
-    if not customer_id or not specification_id or not engine_power_text or not exchange_rate_text:
+    if not customer_id or not specification_id:
         await state.clear()
-        await message.answer("Сессия устарела. Начните создание сметы заново.")
+        await message.answer(SESSION_EXPIRED_REPLY)
         return
 
-    engine_power = parse_positive_decimal(engine_power_text)
-    exchange_rate = parse_positive_decimal(exchange_rate_text)
-    if engine_power is None or exchange_rate is None:
+    parsed_values = _parse_fsm_estimate_values(data)
+    if parsed_values is None:
         await state.clear()
-        await message.answer("Сессия устарела. Начните создание сметы заново.")
+        await message.answer(SESSION_EXPIRED_REPLY)
         return
+
+    (
+        engine_power,
+        exchange_rate,
+        inspect_transport_price,
+        transit_declaration_price,
+        insurance_shipment,
+        custom_clearing,
+    ) = parsed_values
 
     specification = await database.get_specification_by_id(int(specification_id))
     if not specification:
@@ -152,6 +214,10 @@ async def handle_estimate_inspect_transport_price(
             engine_power=engine_power,
             exchange_rate=exchange_rate,
             inspect_transport_price=inspect_transport_price,
+            transit_declaration_price=transit_declaration_price,
+            insurance_shipment=insurance_shipment,
+            custom_clearing=custom_clearing,
+            contractor_comission=contractor_comission,
         )
     except ValueError as error:
         await message.answer(str(error))
@@ -162,3 +228,31 @@ async def handle_estimate_inspect_transport_price(
 
     await state.clear()
     await message.answer(format_estimate_summary(estimate, specification))
+
+
+def _parse_fsm_estimate_values(data: dict) -> tuple | None:
+    engine_power = parse_positive_decimal(data.get("engine_power"))
+    exchange_rate = parse_positive_decimal(data.get("exchange_rate"))
+    inspect_transport_price = parse_non_negative_decimal(data.get("inspect_transport_price"))
+    transit_declaration_price = parse_non_negative_decimal(data.get("transit_declaration_price"))
+    insurance_shipment = parse_non_negative_decimal(data.get("insurance_shipment"))
+    custom_clearing = parse_non_negative_decimal(data.get("custom_clearing"))
+
+    if (
+        engine_power is None
+        or exchange_rate is None
+        or inspect_transport_price is None
+        or transit_declaration_price is None
+        or insurance_shipment is None
+        or custom_clearing is None
+    ):
+        return None
+
+    return (
+        engine_power,
+        exchange_rate,
+        inspect_transport_price,
+        transit_declaration_price,
+        insurance_shipment,
+        custom_clearing,
+    )

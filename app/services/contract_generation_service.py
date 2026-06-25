@@ -11,6 +11,7 @@ from docxtpl import DocxTemplate
 
 from app.database import Database
 from app.services.customer_card_service import format_customer_fio
+from app.services.estimate_service import build_estimates_context_for_contract
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,8 @@ async def generate_customer_contract_docx(
     if not specification:
         raise SpecificationNotFoundError("Спецификация клиента не найдена.")
 
-    context = _build_context(customer, specification)
+    estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    context = _build_context(customer, specification, estimate)
     output_path = _build_output_path(customer, specification)
 
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
@@ -127,7 +129,7 @@ def build_numeric_contract_date(dt: datetime | None = None) -> str:
     return dt.strftime("%d.%m.%Y")
 
 
-def _build_context(customer: dict, specification: dict) -> dict:
+def _build_context(customer: dict, specification: dict, estimate: dict | None = None) -> dict:
     full_name = format_customer_fio(customer)
     if full_name == "—":
         full_name = ""
@@ -175,6 +177,7 @@ def _build_context(customer: dict, specification: dict) -> dict:
             "current_date_text": build_russian_contract_date(contract_now),
             "current_date_numeric": build_numeric_contract_date(contract_now),
         },
+        "estimates": build_estimates_context_for_contract(estimate),
     }
 
 

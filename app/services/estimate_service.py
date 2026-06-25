@@ -11,7 +11,21 @@ from app.services.calcus_customs_service import (
 )
 
 BANK_COMMISSION_RATE = Decimal("0.025")
+CONTRACTOR_COMMISSION_PREPAYMENT_RATE = Decimal("0.375")
+CONTRACTOR_COMMISSION_POSTPAYMENT_RATE = Decimal("0.625")
 DEFAULT_PRICE_CURRENCY = "CNY"
+
+EMPTY_ESTIMATES_CONTEXT = {
+    "price_abroad": "",
+    "bank_commission": "",
+    "transit_declaration_price": "",
+    "insurance_shipment": "",
+    "customs_total": "",
+    "custom_clearing": "",
+    "contractor_comission": "",
+    "contractor_comission_prepayment": "",
+    "contractor_comission_postpayment": "",
+}
 
 SPEC_FIELD_LABELS_FOR_ESTIMATE = {
     "price": "бюджет",
@@ -75,6 +89,10 @@ def calculate_estimate(
     engine_power: Decimal,
     exchange_rate: Decimal,
     inspect_transport_price: Decimal,
+    transit_declaration_price: Decimal,
+    insurance_shipment: Decimal,
+    custom_clearing: Decimal,
+    contractor_comission: Decimal,
     calcus_result: dict | None = None,
     calcus_error: str | None = None,
     calcus_warnings: list[str] | None = None,
@@ -93,11 +111,17 @@ def calculate_estimate(
     price_currency = (specification.get("price_currency") or DEFAULT_PRICE_CURRENCY).strip() or DEFAULT_PRICE_CURRENCY
     price_rub = _quantize_money(price_abroad * exchange_rate)
     bank_commission = _quantize_money(price_rub * BANK_COMMISSION_RATE)
-    transit_declaration_price = Decimal("0")
-    insurance_shipment = Decimal("0")
-    custom_clearing = Decimal("0")
+    transit_declaration_price = _quantize_money(transit_declaration_price)
+    insurance_shipment = _quantize_money(insurance_shipment)
+    custom_clearing = _quantize_money(custom_clearing)
     custom_duties = Decimal("0")
-    contractor_comission = Decimal("0")
+    contractor_comission = _quantize_money(contractor_comission)
+    contractor_comission_prepayment = _quantize_money(
+        contractor_comission * CONTRACTOR_COMMISSION_PREPAYMENT_RATE
+    )
+    contractor_comission_postpayment = _quantize_money(
+        contractor_comission * CONTRACTOR_COMMISSION_POSTPAYMENT_RATE
+    )
 
     customs_fields = {
         "customs_sbor": Decimal("0"),
@@ -128,18 +152,16 @@ def calculate_estimate(
         }
         calcus_success = True
 
+    extra_costs_rub = (
+        transit_declaration_price
+        + insurance_shipment
+        + custom_clearing
+        + contractor_comission
+    )
     if calcus_success:
-        total_rub = _quantize_money(customs_fields["customs_total2"])
+        total_rub = _quantize_money(customs_fields["customs_total2"] + extra_costs_rub)
     else:
-        total_rub = _quantize_money(
-            price_rub
-            + bank_commission
-            + transit_declaration_price
-            + insurance_shipment
-            + custom_clearing
-            + custom_duties
-            + contractor_comission
-        )
+        total_rub = _quantize_money(price_rub + bank_commission + extra_costs_rub)
 
     return {
         "engine_power": _quantize_decimal(engine_power, 2),
@@ -155,6 +177,8 @@ def calculate_estimate(
         "custom_clearing": custom_clearing,
         "custom_duties": custom_duties,
         "contractor_comission": contractor_comission,
+        "contractor_comission_prepayment": contractor_comission_prepayment,
+        "contractor_comission_postpayment": contractor_comission_postpayment,
         "total_rub": total_rub,
         "brand": specification.get("brand") or "",
         "model": specification.get("model") or "",
@@ -174,6 +198,10 @@ async def create_estimate(
     engine_power: Decimal,
     exchange_rate: Decimal,
     inspect_transport_price: Decimal,
+    transit_declaration_price: Decimal,
+    insurance_shipment: Decimal,
+    custom_clearing: Decimal,
+    contractor_comission: Decimal,
     calcus_service: CalcusCustomsService | None = None,
 ) -> dict:
     specification_price = parse_positive_decimal(specification.get("price"))
@@ -194,6 +222,10 @@ async def create_estimate(
         engine_power=engine_power,
         exchange_rate=exchange_rate,
         inspect_transport_price=inspect_transport_price,
+        transit_declaration_price=transit_declaration_price,
+        insurance_shipment=insurance_shipment,
+        custom_clearing=custom_clearing,
+        contractor_comission=contractor_comission,
         calcus_result=calcus_outcome.response,
         calcus_error=calcus_outcome.error,
         calcus_warnings=calcus_outcome.warnings,
@@ -215,6 +247,27 @@ async def get_estimate_by_customer_id(database: Database, customer_id: int) -> d
 
 async def get_estimate_by_id(database: Database, estimate_id: int) -> dict | None:
     return await database.get_estimate_by_id(estimate_id)
+
+
+def build_estimates_context_for_contract(estimate: dict | None) -> dict[str, str]:
+    if not estimate:
+        return dict(EMPTY_ESTIMATES_CONTEXT)
+
+    return {
+        "price_abroad": format_money_for_docx(estimate.get("price_abroad")),
+        "bank_commission": format_money_for_docx(estimate.get("bank_commission")),
+        "transit_declaration_price": format_money_for_docx(estimate.get("transit_declaration_price")),
+        "insurance_shipment": format_money_for_docx(estimate.get("insurance_shipment")),
+        "customs_total": format_money_for_docx(estimate.get("customs_total")),
+        "custom_clearing": format_money_for_docx(estimate.get("custom_clearing")),
+        "contractor_comission": format_money_for_docx(estimate.get("contractor_comission")),
+        "contractor_comission_prepayment": format_money_for_docx(
+            estimate.get("contractor_comission_prepayment")
+        ),
+        "contractor_comission_postpayment": format_money_for_docx(
+            estimate.get("contractor_comission_postpayment")
+        ),
+    }
 
 
 def format_estimate_summary(estimate: dict, specification: dict | None = None) -> str:
@@ -239,6 +292,14 @@ def format_estimate_summary(estimate: dict, specification: dict | None = None) -
         f"Курс: {_format_amount(estimate.get('exchange_rate'))}",
         f"Стоимость авто в RUB: {_format_amount(estimate.get('price_rub'))}",
         f"Банковская комиссия 2,5%: {_format_amount(estimate.get('bank_commission'))}",
+        f"Приемка в РК и транзитная декларация: {_format_rub(estimate.get('transit_declaration_price'))}",
+        f"Страхование и доставка до города назначения: {_format_rub(estimate.get('insurance_shipment'))}",
+        f"Таможенная очистка: {_format_rub(estimate.get('custom_clearing'))}",
+        f"Комиссия исполнителя: {_format_rub(estimate.get('contractor_comission'))}",
+        "Предоплата комиссии исполнителя 37,5%: "
+        f"{_format_rub(estimate.get('contractor_comission_prepayment'))}",
+        "Остаток комиссии исполнителя 62,5%: "
+        f"{_format_rub(estimate.get('contractor_comission_postpayment'))}",
     ]
 
     if estimate.get("customs_error"):
@@ -262,6 +323,17 @@ def format_estimate_summary(estimate: dict, specification: dict | None = None) -
 
     lines.append(f"Итого: {_format_amount(estimate.get('total_rub'))} RUB")
     return "\n".join(lines)
+
+
+def format_money_for_docx(value: object) -> str:
+    if value is None:
+        return ""
+    formatted = _format_amount(value)
+    if formatted == "—":
+        return ""
+    if formatted.endswith(".00"):
+        return formatted[:-3]
+    return formatted
 
 
 def _quantize_money(value: Decimal) -> Decimal:

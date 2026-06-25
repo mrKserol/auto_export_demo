@@ -190,6 +190,8 @@ CREATE TABLE IF NOT EXISTS estimates (
     customs_raw_response JSONB,
     customs_error TEXT,
     inspect_transport_price NUMERIC(14, 2) DEFAULT 0,
+    contractor_comission_prepayment NUMERIC(14, 2) DEFAULT 0,
+    contractor_comission_postpayment NUMERIC(14, 2) DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -207,6 +209,8 @@ ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL = [
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_raw_response JSONB;",
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_error TEXT;",
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS inspect_transport_price NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS contractor_comission_prepayment NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS contractor_comission_postpayment NUMERIC(14, 2) DEFAULT 0;",
 ]
 
 ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
@@ -1109,11 +1113,13 @@ class Database:
                     customs_raw_response,
                     customs_error,
                     inspect_transport_price,
+                    contractor_comission_prepayment,
+                    contractor_comission_postpayment,
                     created_at,
                     updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26, $27, $27
+                    $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26, $27, $28, $29, $29
                 )
                 RETURNING id;
                 """,
@@ -1145,9 +1151,27 @@ class Database:
                 else None,
                 data.get("customs_error"),
                 data.get("inspect_transport_price"),
+                data.get("contractor_comission_prepayment"),
+                data.get("contractor_comission_postpayment"),
                 now,
             )
             return int(estimate_id)
+
+    async def get_estimate_by_specification_id(self, specification_id: int) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT * FROM estimates
+                WHERE specification_id = $1
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                specification_id,
+            )
+            return _record_to_dict(row) if row else None
 
     async def delete_estimates_by_specification_id(self, specification_id: int) -> None:
         if self._pool is None:
