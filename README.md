@@ -103,6 +103,14 @@ messages, disable privacy mode for the bot in BotFather.
 
 The bot also works in private chat.
 
+## Contract Template Variables
+
+`templates/customer_contract_template.docx` supports Jinja/docxtpl placeholders, including:
+
+- `{{ customer.full_name }}` — full name: Last First Patronymic
+- `{{ customer.short_name }}` — short name: Last F. P.
+- `{{ customer.last_name }}`, `{{ customer.first_name }}`, `{{ customer.surname }}`
+
 ## Database
 
 The bot creates a `documents` table with Telegram metadata, Yandex Disk path,

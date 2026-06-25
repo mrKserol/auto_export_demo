@@ -65,10 +65,36 @@ async def generate_customer_contract_docx(
     return str(output_path)
 
 
+def build_short_name(
+    last_name: str | None,
+    first_name: str | None,
+    surname: str | None,
+) -> str:
+    last_name = (last_name or "").strip()
+    first_name = (first_name or "").strip()
+    surname = (surname or "").strip()
+
+    parts: list[str] = []
+    if last_name:
+        parts.append(last_name)
+    if first_name:
+        parts.append(f"{first_name[0].upper()}.")
+    if surname:
+        parts.append(f"{surname[0].upper()}.")
+
+    return " ".join(parts)
+
+
 def _build_context(customer: dict, specification: dict) -> dict:
     full_name = format_customer_fio(customer)
     if full_name == "—":
         full_name = ""
+
+    short_name = build_short_name(
+        customer.get("last_name"),
+        customer.get("first_name"),
+        customer.get("surname"),
+    )
 
     return {
         "customer": {
@@ -78,6 +104,7 @@ def _build_context(customer: dict, specification: dict) -> dict:
             "last_name": customer.get("last_name") or "",
             "surname": customer.get("surname") or "",
             "full_name": full_name,
+            "short_name": short_name,
             "by_whom_issued": customer.get("by_whom_issued") or "",
             "date_issue": customer.get("date_issue") or "",
             "department_code": customer.get("department_code") or "",
