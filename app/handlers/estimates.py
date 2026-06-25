@@ -32,7 +32,17 @@ async def handle_estimate_create_start(
     if callback.message is None:
         return
 
-    customer_id = int(callback.data.split(":", 1)[1])
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[0] != "estimate" or parts[1] != "create":
+        await callback.answer("Некорректная команда сметы", show_alert=True)
+        return
+
+    try:
+        customer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный ID клиента", show_alert=True)
+        return
+
     customer = await database.get_customer_by_id(customer_id)
     if not customer:
         await callback.message.answer("Клиент не найден.")
