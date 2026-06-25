@@ -258,7 +258,53 @@ async def handle_registration_upload(
 
     customer_fields["registration_address"] = address
     await state.update_data(customer_fields=customer_fields)
-    await _go_to_snils_step(message, state, customer_fields)
+    await state.set_state(CustomerAddStates.waiting_registration_confirmation)
+    await message.answer(
+        "Адрес регистрации распознан:\n\n"
+        f"{address}\n\n"
+        "Проверьте адрес регистрации.",
+        reply_markup=_registration_confirmation_keyboard(),
+    )
+
+
+@router.callback_query(
+    StateFilter(CustomerAddStates.waiting_registration_confirmation),
+    F.data == "add_customer_registration:confirm",
+)
+async def handle_registration_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+
+    data = await state.get_data()
+    customer_fields = dict(data.get("customer_fields") or {})
+
+    if not customer_fields.get("registration_address"):
+        await state.set_state(CustomerAddStates.waiting_registration)
+        await callback.message.answer(
+            "Адрес регистрации не найден. Введите адрес вручную.",
+            reply_markup=_manual_registration_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    await _go_to_snils_step(callback.message, state, customer_fields)
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(CustomerAddStates.waiting_registration_confirmation),
+    F.data == "add_customer_registration:edit_address",
+)
+async def handle_registration_edit_address_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+
+    await state.set_state(CustomerAddStates.waiting_manual_registration_address)
+    await callback.message.answer(
+        "Введите правильный адрес регистрации вручную.\n\n"
+        "Пример: г. Уфа, ул. Ахметова 22 стр. 5 кв. 21"
+    )
+    await callback.answer()
 
 
 @router.callback_query(
@@ -568,10 +614,15 @@ async def _go_to_snils_step(
 ) -> None:
     await state.set_state(CustomerAddStates.waiting_snils)
     await message.answer(
-        "Адрес регистрации распознан:\n\n"
+        "✅ Адрес регистрации сохранён:\n\n"
         f"{customer_fields.get('registration_address')}\n\n"
         "Шаг 3 из 4.\n"
-        "Отправьте ОДИН файл: СНИЛС."
+        f"Отправьте ОДИН файл: СНИЛС для клиента:\n"
+        f"{format_customer_fio(customer_fields)}\n\n"
+        f"Паспортные данные:\n"
+        f"{customer_fields.get('passport')}, выдан {customer_fields.get('by_whom_issued') or '—'}\n"
+        f"Дата выдачи: {customer_fields.get('date_issue') or '—'}, "
+        f"код подразделения: {customer_fields.get('department_code') or '—'}"
     )
 
 
@@ -716,6 +767,25 @@ def _format_document_type_mismatch_message(
         f"Похоже, это не {expected_label}.\n"
         f"Сейчас нужен: один файл — {expected_label}.\n"
         f"Обнаружено: {detected_label}."
+    )
+
+
+def _registration_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Данные верны",
+                    callback_data="add_customer_registration:confirm",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Исправить адрес регистрации",
+                    callback_data="add_customer_registration:edit_address",
+                )
+            ],
+        ]
     )
 
 

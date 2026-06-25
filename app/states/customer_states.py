@@ -6,6 +6,7 @@ class CustomerAddStates(StatesGroup):
     waiting_passport_confirmation = State()
     waiting_manual_passport_number = State()
     waiting_registration = State()
+    waiting_registration_confirmation = State()
     waiting_snils = State()
     waiting_tin = State()
     waiting_phone = State()
