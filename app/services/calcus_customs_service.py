@@ -166,9 +166,11 @@ class CalcusCustomsService:
     def __init__(
         self,
         api_key: str | None = None,
+        client_id: str | None = None,
         api_url: str | None = None,
     ) -> None:
         self._api_key = (api_key if api_key is not None else os.getenv("CALCUS_API_KEY") or "").strip()
+        self._client_id = (client_id if client_id is not None else os.getenv("CALCUS_CLIENT_ID") or "").strip()
         self._api_url = (
             api_url
             if api_url is not None
@@ -189,6 +191,11 @@ class CalcusCustomsService:
             return CalcusCustomsResult(
                 success=False,
                 error="CALCUS_API_KEY is not configured",
+            )
+        if not self._client_id:
+            return CalcusCustomsResult(
+                success=False,
+                error="CALCUS_CLIENT_ID is not configured",
             )
 
         try:
@@ -233,31 +240,84 @@ class CalcusCustomsService:
 
     async def _post_customs(self, payload: dict[str, Any]) -> dict[str, Any]:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+        last_status: int | None = None
+        last_body = ""
+        last_auth_mode = ""
+
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            response, body_text = await self._request_with_headers(
-                session,
-                self._build_headers(use_api_key_header=False),
-                payload,
-            )
-            if response.status in {401, 403}:
+            for auth_mode, headers in self._auth_header_variants():
                 response, body_text = await self._request_with_headers(
                     session,
-                    self._build_headers(use_api_key_header=True),
+                    headers,
                     payload,
                 )
+                if response.status < 400:
+                    try:
+                        data = json.loads(body_text)
+                    except json.JSONDecodeError as exc:
+                        raise CalcusApiError("Calcus API returned invalid JSON") from exc
 
-            if response.status >= 400:
+                    if not isinstance(data, dict):
+                        raise CalcusApiError("Calcus API returned unexpected response format")
+                    return data
+
+                if response.status in {401, 403}:
+                    logger.warning(
+                        "Calcus customs API auth failed: status=%s auth_mode=%s body=%s",
+                        response.status,
+                        auth_mode,
+                        _short_error_message(body_text, response.status),
+                    )
+                    last_status = response.status
+                    last_body = body_text
+                    last_auth_mode = auth_mode
+                    continue
+
                 short_error = _short_error_message(body_text, response.status)
                 raise CalcusApiError(short_error, status_code=response.status)
 
-            try:
-                data = json.loads(body_text)
-            except json.JSONDecodeError as exc:
-                raise CalcusApiError("Calcus API returned invalid JSON") from exc
+        short_error = _short_error_message(last_body, last_status or 401)
+        raise CalcusApiError(
+            f"{short_error} (auth_mode={last_auth_mode})",
+            status_code=last_status,
+        )
 
-            if not isinstance(data, dict):
-                raise CalcusApiError("Calcus API returned unexpected response format")
-            return data
+    def _auth_header_variants(self) -> list[tuple[str, dict[str, str]]]:
+        # If Calcus requires another client-key header, update here.
+        return [
+            (
+                "x-client-id+x-api-key",
+                {
+                    "Content-Type": "application/json",
+                    "X-Client-Id": self._client_id,
+                    "X-Api-Key": self._api_key,
+                },
+            ),
+            (
+                "x-client-id-uppercase+x-api-key",
+                {
+                    "Content-Type": "application/json",
+                    "X-Client-ID": self._client_id,
+                    "X-API-Key": self._api_key,
+                },
+            ),
+            (
+                "client-id+api-key",
+                {
+                    "Content-Type": "application/json",
+                    "Client-Id": self._client_id,
+                    "Api-Key": self._api_key,
+                },
+            ),
+            (
+                "authorization-bearer+client-id",
+                {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._api_key}",
+                    "X-Client-Id": self._client_id,
+                },
+            ),
+        ]
 
     async def _request_with_headers(
         self,
@@ -268,18 +328,6 @@ class CalcusCustomsService:
         async with session.post(self._api_url, json=payload, headers=headers) as response:
             body_text = await response.text()
             return response, body_text
-
-    def _build_headers(self, *, use_api_key_header: bool) -> dict[str, str]:
-        # If Calcus requires another client-key header, update here.
-        if use_api_key_header:
-            return {
-                "Content-Type": "application/json",
-                "X-API-Key": self._api_key,
-            }
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
 
 
 def extract_customs_fields(calcus_response: dict[str, Any]) -> dict[str, Any]:
