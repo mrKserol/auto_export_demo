@@ -24,11 +24,11 @@ def build_customer_card_keyboard(
                         callback_data=f"estimate:recreate:{customer_id}",
                     ),
                     InlineKeyboardButton(
-                        text="Сформировать договор",
+                        text="Договор",
                         callback_data=f"contract:generate:{customer_id}",
                     ),
                     InlineKeyboardButton(
-                        text="Сформировать смету",
+                        text="Смета",
                         callback_data=f"estimate:file:{customer_id}",
                     ),
                 ]
