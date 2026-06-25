@@ -195,15 +195,15 @@ class CalcusCustomsService:
         power_unit: int | None = None,
     ) -> CalcusCustomsResult:
         warnings: list[str] = []
-        if not self._api_key:
-            return CalcusCustomsResult(
-                success=False,
-                error="CALCUS_API_KEY is not configured",
-            )
         if not self._client_id:
             return CalcusCustomsResult(
                 success=False,
                 error="CALCUS_CLIENT_ID is not configured",
+            )
+        if not self._api_key:
+            return CalcusCustomsResult(
+                success=False,
+                error="CALCUS_API_KEY is not configured",
             )
 
         try:
@@ -293,9 +293,17 @@ class CalcusCustomsService:
         )
 
     def _build_auth_variants(self) -> list[CalcusAuthVariant]:
-        # If Calcus requires another client-key header, update here.
+        # OpenAPI: Api-Client-Id + Api-Key headers (components.securitySchemes).
         json_headers = {"Content-Type": "application/json"}
         return [
+            CalcusAuthVariant(
+                mode="api-client-id+api-key",
+                headers={
+                    **json_headers,
+                    "Api-Client-Id": self._client_id,
+                    "Api-Key": self._api_key,
+                },
+            ),
             CalcusAuthVariant(
                 mode="x-client-id+x-api-key",
                 headers={
