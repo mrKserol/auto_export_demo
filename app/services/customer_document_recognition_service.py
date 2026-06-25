@@ -66,6 +66,10 @@ OCR текст документа:
 - Код подразделения имеет формат 000-000, это НЕ номер паспорта.
 - Дата выдачи имеет формат DD.MM.YYYY, это НЕ номер паспорта.
 - Если на правом краю страницы есть повторяющиеся красные цифры, используй их как источник серии и номера паспорта.
+- Не извлекай номер паспорта из нижней машинночитаемой зоны MRZ.
+- MRZ содержит строки с PNRUS, RUS, символами << и латинской транслитерацией имени.
+- Номер паспорта РФ нужно брать из красных вертикальных цифр на правом краю страницы или из обычного поля серии/номера.
+- Если видишь в MRZ число вроде 3026943460, не используй его как номер паспорта.
 - Код подразделения в формате "000-000".
 - Дата выдачи в формате DD.MM.YYYY.
 - Не придумывай данные.
@@ -536,8 +540,31 @@ def _build_document_type_mismatch(expected_document_type: str, guard: dict) -> d
 
 
 def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
+    text_without_mrz = _remove_mrz_lines(ocr_text)
+
+    passport = _normalize_passport_value(gpt_json.get("passport"))
+    if _is_likely_mrz_passport_candidate(passport, ocr_text):
+        passport = None
+
+    if not passport:
+        passport = _extract_passport_from_side_vertical_digits(
+            text_without_mrz,
+            source_ocr_text=ocr_text,
+        )
+
+    if not passport:
+        series = _clean_text(gpt_json.get("passport_series"))
+        number = _clean_text(gpt_json.get("passport_number"))
+        if series and number:
+            series_number_passport = normalize_passport(f"{series}{number}")
+            if series_number_passport and not _is_likely_mrz_passport_candidate(
+                series_number_passport,
+                ocr_text,
+            ):
+                passport = series_number_passport
+
     fields = {
-        "passport": _normalize_passport_value(gpt_json.get("passport")),
+        "passport": passport,
         "first_name": _clean_text(gpt_json.get("first_name")),
         "last_name": _clean_text(gpt_json.get("last_name")),
         "surname": _clean_text(gpt_json.get("surname")),
@@ -546,33 +573,29 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         "department_code": normalize_department_code(_clean_text(gpt_json.get("department_code"))),
     }
 
-    if not fields["passport"]:
-        series = _clean_text(gpt_json.get("passport_series"))
-        number = _clean_text(gpt_json.get("passport_number"))
-        if series and number:
-            fields["passport"] = normalize_passport(f"{series}{number}")
-
-    fallback = extract_passport_main_fields({"ocr_text": ocr_text})
+    fallback = extract_passport_main_fields({"ocr_text": text_without_mrz})
     for key, value in fallback.items():
+        if key == "passport" and value and _is_likely_mrz_passport_candidate(value, ocr_text):
+            continue
         if value and not fields.get(key):
             fields[key] = value
 
     if not fields["passport"]:
-        fields["passport"] = _extract_passport_from_vertical_or_side_numbers(ocr_text)
+        vertical_passport = _extract_passport_from_vertical_or_side_numbers(text_without_mrz)
+        if vertical_passport and not _is_likely_mrz_passport_candidate(vertical_passport, ocr_text):
+            fields["passport"] = vertical_passport
 
     if not fields["passport"]:
-        passport_match = re.search(r"\b(\d{2})\s*(\d{2})\s*(\d{6})\b", ocr_text)
+        passport_match = re.search(r"\b(\d{2})\s*(\d{2})\s*(\d{6})\b", text_without_mrz)
         if passport_match:
-            fields["passport"] = normalize_passport(
+            regex_passport = normalize_passport(
                 f"{passport_match.group(1)}{passport_match.group(2)}{passport_match.group(3)}"
             )
+            if regex_passport and not _is_likely_mrz_passport_candidate(regex_passport, ocr_text):
+                fields["passport"] = regex_passport
 
     if not fields["passport"]:
-        numeric_tokens = _collect_numeric_tokens_from_ocr(ocr_text)
-        logger.warning(
-            "Passport number not found. digit_tokens=%s",
-            _mask_digit_tokens_for_log(numeric_tokens),
-        )
+        logger.warning("Passport number not found after MRZ cleanup")
 
     if not fields["department_code"]:
         code_match = re.search(r"\b\d{3}-\d{3}\b", ocr_text)
@@ -601,6 +624,99 @@ _EXCLUDED_LINE_KEYWORDS = (
     "СНИЛС",
     "СТРАХОВ",
 )
+
+
+def _remove_mrz_lines(ocr_text: str) -> str:
+    lines: list[str] = []
+    for line in (ocr_text or "").splitlines():
+        upper = line.upper()
+        if "<<" in upper:
+            continue
+        if "PNRUS" in upper:
+            continue
+        if re.search(r"\bRUS\b", upper) and re.search(r"\d{6,}", upper):
+            continue
+        if re.search(r"[A-Z]{3,}", upper) and re.search(r"\d{6,}", upper):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _is_likely_mrz_passport_candidate(passport: str | None, ocr_text: str) -> bool:
+    normalized = re.sub(r"\D", "", passport or "")
+    if len(normalized) != 10:
+        return False
+
+    for line in (ocr_text or "").splitlines():
+        compact_line = re.sub(r"\D", "", line)
+        upper = line.upper()
+        if normalized in compact_line and (
+            "<<" in upper
+            or "PNRUS" in upper
+            or "RUS" in upper
+            or re.search(r"[A-Z]{3,}", upper)
+        ):
+            return True
+
+    return False
+
+
+def _is_valid_passport_10_digits(candidate: str, ocr_text: str | None = None) -> bool:
+    digits = re.sub(r"\D", "", candidate or "")
+    if len(digits) != 10:
+        return False
+    if ocr_text and _is_excluded_passport_digits(digits, ocr_text):
+        return False
+    return True
+
+
+def _extract_passport_from_side_vertical_digits(
+    ocr_text: str,
+    *,
+    source_ocr_text: str | None = None,
+) -> str | None:
+    text = _remove_mrz_lines(ocr_text)
+    source_text = source_ocr_text or ocr_text
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    tokens: list[str] = []
+    for line in lines:
+        tokens.extend(re.findall(r"\d+", line))
+
+    candidates: list[str] = []
+
+    for index in range(len(tokens) - 2):
+        if (
+            re.fullmatch(r"\d{2}", tokens[index])
+            and re.fullmatch(r"\d{2}", tokens[index + 1])
+            and re.fullmatch(r"\d{6}", tokens[index + 2])
+        ):
+            candidate = tokens[index] + tokens[index + 1] + tokens[index + 2]
+            if _is_valid_passport_10_digits(candidate, text):
+                candidates.append(candidate)
+
+    for index in range(len(tokens) - 3):
+        if (
+            re.fullmatch(r"\d{2}", tokens[index])
+            and re.fullmatch(r"\d{2}", tokens[index + 1])
+            and re.fullmatch(r"\d{2}", tokens[index + 2])
+            and re.fullmatch(r"\d{4}", tokens[index + 3])
+        ):
+            candidate = (
+                tokens[index]
+                + tokens[index + 1]
+                + tokens[index + 2]
+                + tokens[index + 3]
+            )
+            if _is_valid_passport_10_digits(candidate, text):
+                candidates.append(candidate)
+
+    for candidate in candidates:
+        normalized = normalize_passport(candidate)
+        if normalized and not _is_likely_mrz_passport_candidate(normalized, source_text):
+            return normalized
+
+    return None
 
 
 def _extract_passport_from_vertical_or_side_numbers(ocr_text: str) -> str | None:
