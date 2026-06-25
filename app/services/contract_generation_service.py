@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from docxtpl import DocxTemplate
 
@@ -16,6 +18,21 @@ TEMPLATE_PATH = Path("templates/customer_contract_template.docx")
 GENERATED_DIR = Path("generated_contracts")
 
 _INVALID_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|]')
+
+RUSSIAN_MONTHS_GENITIVE = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
 
 
 class CustomerNotFoundError(Exception):
@@ -85,6 +102,31 @@ def build_short_name(
     return " ".join(parts)
 
 
+def get_contract_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("Europe/Moscow"))
+    except Exception:
+        return datetime.now()
+
+
+def build_russian_contract_date(dt: datetime | None = None) -> str:
+    if dt is None:
+        dt = get_contract_now()
+
+    day = f"{dt.day:02d}"
+    month = RUSSIAN_MONTHS_GENITIVE[dt.month]
+    year = dt.year
+
+    return f"«{day}» {month} {year} г."
+
+
+def build_numeric_contract_date(dt: datetime | None = None) -> str:
+    if dt is None:
+        dt = get_contract_now()
+
+    return dt.strftime("%d.%m.%Y")
+
+
 def _build_context(customer: dict, specification: dict) -> dict:
     full_name = format_customer_fio(customer)
     if full_name == "—":
@@ -95,6 +137,7 @@ def _build_context(customer: dict, specification: dict) -> dict:
         customer.get("first_name"),
         customer.get("surname"),
     )
+    contract_now = get_contract_now()
 
     return {
         "customer": {
@@ -127,6 +170,10 @@ def _build_context(customer: dict, specification: dict) -> dict:
             "complectation": specification.get("complectation") or "",
             "mileage": specification.get("mileage") or "",
             "price": specification.get("price") or "",
+        },
+        "contract": {
+            "current_date_text": build_russian_contract_date(contract_now),
+            "current_date_numeric": build_numeric_contract_date(contract_now),
         },
     }
 
