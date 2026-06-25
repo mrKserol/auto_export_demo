@@ -50,7 +50,12 @@ async def handle_generate_contract(
     await callback.message.answer("Формирую договор...")
 
     try:
-        file_path = await generate_customer_contract_docx(customer_id, database)
+        estimate = await database.get_estimate_by_customer_id(customer_id)
+        file_path = await generate_customer_contract_docx(
+            customer_id,
+            database,
+            estimate=estimate,
+        )
         await callback.message.answer_document(
             FSInputFile(file_path),
             caption="Готово. Договор сформирован.",

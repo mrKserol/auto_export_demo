@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -11,7 +12,6 @@ from docxtpl import DocxTemplate
 
 from app.database import Database
 from app.services.customer_card_service import format_customer_fio
-from app.services.estimate_service import build_estimates_context_for_contract
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,8 @@ class TemplateNotFoundError(Exception):
 async def generate_customer_contract_docx(
     customer_id: int,
     database: Database,
+    *,
+    estimate: dict | None = None,
 ) -> str:
     if not TEMPLATE_PATH.is_file():
         raise TemplateNotFoundError(
@@ -75,7 +77,11 @@ async def generate_customer_contract_docx(
     if not specification:
         raise SpecificationNotFoundError("Спецификация клиента не найдена.")
 
-    estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if estimate is None:
+        estimate = await database.get_estimate_by_customer_id(customer_id)
+    if estimate is None and specification_id:
+        estimate = await database.get_estimate_by_specification_id(int(specification_id))
+
     context = _build_context(customer, specification, estimate)
     output_path = _build_output_path(customer, specification)
 
@@ -177,8 +183,69 @@ def _build_context(customer: dict, specification: dict, estimate: dict | None = 
             "current_date_text": build_russian_contract_date(contract_now),
             "current_date_numeric": build_numeric_contract_date(contract_now),
         },
-        "estimates": build_estimates_context_for_contract(estimate),
+        "estimates": build_estimates_context(estimate),
     }
+
+
+def build_estimates_context(estimate: dict | None) -> dict[str, str]:
+    if not estimate:
+        return {
+            "price_currency": "",
+            "exchange_rate": "",
+            "price_rub": "",
+            "price_abroad": "",
+            "bank_commission": "",
+            "transit_declaration_price": "",
+            "insurance_shipment": "",
+            "customs_total": "",
+            "custom_clearing": "",
+            "contractor_comission": "",
+            "contractor_comission_prepayment": "",
+            "contractor_comission_postpayment": "",
+        }
+
+    return {
+        "price_currency": estimate.get("price_currency") or "",
+        "exchange_rate": format_template_number(estimate.get("exchange_rate")),
+        "price_rub": format_template_money(estimate.get("price_rub")),
+        "price_abroad": format_template_money(estimate.get("price_abroad")),
+        "bank_commission": format_template_money(estimate.get("bank_commission")),
+        "transit_declaration_price": format_template_money(
+            estimate.get("transit_declaration_price")
+        ),
+        "insurance_shipment": format_template_money(estimate.get("insurance_shipment")),
+        "customs_total": format_template_money(estimate.get("customs_total")),
+        "custom_clearing": format_template_money(estimate.get("custom_clearing")),
+        "contractor_comission": format_template_money(estimate.get("contractor_comission")),
+        "contractor_comission_prepayment": format_template_money(
+            estimate.get("contractor_comission_prepayment")
+        ),
+        "contractor_comission_postpayment": format_template_money(
+            estimate.get("contractor_comission_postpayment")
+        ),
+    }
+
+
+def format_template_number(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        number = Decimal(str(value))
+    except Exception:
+        return str(value)
+
+    normalized = number.normalize()
+    text = format(normalized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def format_template_money(value: object) -> str:
+    text = format_template_number(value)
+    if not text:
+        return ""
+    return text
 
 
 def _sanitize_filename_part(value: str) -> str:

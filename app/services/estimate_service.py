@@ -15,18 +15,6 @@ CONTRACTOR_COMMISSION_PREPAYMENT_RATE = Decimal("0.375")
 CONTRACTOR_COMMISSION_POSTPAYMENT_RATE = Decimal("0.625")
 DEFAULT_PRICE_CURRENCY = "CNY"
 
-EMPTY_ESTIMATES_CONTEXT = {
-    "price_abroad": "",
-    "bank_commission": "",
-    "transit_declaration_price": "",
-    "insurance_shipment": "",
-    "customs_total": "",
-    "custom_clearing": "",
-    "contractor_comission": "",
-    "contractor_comission_prepayment": "",
-    "contractor_comission_postpayment": "",
-}
-
 SPEC_FIELD_LABELS_FOR_ESTIMATE = {
     "price": "бюджет",
     "year": "год",
@@ -249,27 +237,6 @@ async def get_estimate_by_id(database: Database, estimate_id: int) -> dict | Non
     return await database.get_estimate_by_id(estimate_id)
 
 
-def build_estimates_context_for_contract(estimate: dict | None) -> dict[str, str]:
-    if not estimate:
-        return dict(EMPTY_ESTIMATES_CONTEXT)
-
-    return {
-        "price_abroad": format_money_for_docx(estimate.get("price_abroad")),
-        "bank_commission": format_money_for_docx(estimate.get("bank_commission")),
-        "transit_declaration_price": format_money_for_docx(estimate.get("transit_declaration_price")),
-        "insurance_shipment": format_money_for_docx(estimate.get("insurance_shipment")),
-        "customs_total": format_money_for_docx(estimate.get("customs_total")),
-        "custom_clearing": format_money_for_docx(estimate.get("custom_clearing")),
-        "contractor_comission": format_money_for_docx(estimate.get("contractor_comission")),
-        "contractor_comission_prepayment": format_money_for_docx(
-            estimate.get("contractor_comission_prepayment")
-        ),
-        "contractor_comission_postpayment": format_money_for_docx(
-            estimate.get("contractor_comission_postpayment")
-        ),
-    }
-
-
 def format_estimate_summary(estimate: dict, specification: dict | None = None) -> str:
     brand = (specification or estimate).get("brand") or estimate.get("brand") or "—"
     model = (specification or estimate).get("model") or estimate.get("model") or "—"
@@ -323,17 +290,6 @@ def format_estimate_summary(estimate: dict, specification: dict | None = None) -
 
     lines.append(f"Итого: {_format_amount(estimate.get('total_rub'))} RUB")
     return "\n".join(lines)
-
-
-def format_money_for_docx(value: object) -> str:
-    if value is None:
-        return ""
-    formatted = _format_amount(value)
-    if formatted == "—":
-        return ""
-    if formatted.endswith(".00"):
-        return formatted[:-3]
-    return formatted
 
 
 def _quantize_money(value: Decimal) -> Decimal:
