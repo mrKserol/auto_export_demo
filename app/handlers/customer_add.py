@@ -38,6 +38,8 @@ from app.yadisk_client import YandexDiskClient
 router = Router(name="customer_add")
 logger = logging.getLogger(__name__)
 
+PROCESSING_FILE_MESSAGE = "Подождите, обрабатываю файл…"
+
 
 @router.message(Command("add_customer"))
 async def handle_add_customer(message: Message, state: FSMContext) -> None:
@@ -57,6 +59,8 @@ async def handle_passport_main_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    await message.answer(PROCESSING_FILE_MESSAGE)
+
     response_payload = await _upload_customer_file(message, bot, yandex_disk_client)
     if response_payload is None:
         return
@@ -104,6 +108,8 @@ async def handle_registration_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    await message.answer(PROCESSING_FILE_MESSAGE)
+
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
     expected_passport = customer_fields.get("passport")
@@ -186,6 +192,8 @@ async def handle_snils_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    await message.answer(PROCESSING_FILE_MESSAGE)
+
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
     response_payload = await _upload_customer_file(message, bot, yandex_disk_client)
@@ -265,6 +273,8 @@ async def handle_tin_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    await message.answer(PROCESSING_FILE_MESSAGE)
+
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
     response_payload = await _upload_customer_file(message, bot, yandex_disk_client)
