@@ -179,10 +179,33 @@ CREATE TABLE IF NOT EXISTS estimates (
     custom_duties NUMERIC(14, 2),
     contractor_comission NUMERIC(14, 2),
     total_rub NUMERIC(14, 2),
+    customs_sbor NUMERIC(14, 2) DEFAULT 0,
+    customs_tax NUMERIC(14, 2) DEFAULT 0,
+    customs_util NUMERIC(14, 2) DEFAULT 0,
+    customs_nds NUMERIC(14, 2) DEFAULT 0,
+    customs_excise NUMERIC(14, 2) DEFAULT 0,
+    customs_total NUMERIC(14, 2) DEFAULT 0,
+    customs_total2 NUMERIC(14, 2) DEFAULT 0,
+    customs_source TEXT,
+    customs_raw_response JSONB,
+    customs_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
+
+ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL = [
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_sbor NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_tax NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_util NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_nds NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_excise NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_total NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_total2 NUMERIC(14, 2) DEFAULT 0;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_source TEXT;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_raw_response JSONB;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_error TEXT;",
+]
 
 ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS by_whom_issued TEXT;",
@@ -341,6 +364,8 @@ class Database:
             await connection.execute(CREATE_SPECIFICATIONS_TABLE_SQL)
             await connection.execute(CREATE_ESTIMATES_TABLE_SQL)
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
+                await connection.execute(statement)
+            for statement in ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL:
                 await connection.execute(statement)
             await connection.execute(ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL)
             for statement in ENSURE_DOCUMENTS_COLUMNS_SQL:
@@ -1070,10 +1095,21 @@ class Database:
                     custom_duties,
                     contractor_comission,
                     total_rub,
+                    customs_sbor,
+                    customs_tax,
+                    customs_util,
+                    customs_nds,
+                    customs_excise,
+                    customs_total,
+                    customs_total2,
+                    customs_source,
+                    customs_raw_response,
+                    customs_error,
                     created_at,
                     updated_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26, $26
                 )
                 RETURNING id;
                 """,
@@ -1092,6 +1128,18 @@ class Database:
                 data.get("custom_duties"),
                 data.get("contractor_comission"),
                 data.get("total_rub"),
+                data.get("customs_sbor"),
+                data.get("customs_tax"),
+                data.get("customs_util"),
+                data.get("customs_nds"),
+                data.get("customs_excise"),
+                data.get("customs_total"),
+                data.get("customs_total2"),
+                data.get("customs_source"),
+                json.dumps(data.get("customs_raw_response"))
+                if data.get("customs_raw_response") is not None
+                else None,
+                data.get("customs_error"),
                 now,
             )
             return int(estimate_id)
