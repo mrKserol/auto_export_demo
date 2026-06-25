@@ -16,25 +16,21 @@ def build_customer_card_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
 
     if customer.get("specification_id"):
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="Сформировать договор",
-                    callback_data=f"customer_generate_contract:{customer_id}",
-                ),
-                InlineKeyboardButton(
-                    text="Изменить спецификацию",
-                    callback_data=f"customer_edit_spec:{customer_id}",
-                ),
-            ]
-        )
         if has_estimate:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text="Показать смету",
-                        callback_data=f"estimate:show:{customer_id}",
-                    )
+                        text="Пересоздать смету",
+                        callback_data=f"estimate:recreate:{customer_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Сформировать договор",
+                        callback_data=f"contract:generate:{customer_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Сформировать смету",
+                        callback_data=f"estimate:file:{customer_id}",
+                    ),
                 ]
             )
         else:
@@ -43,9 +39,17 @@ def build_customer_card_keyboard(
                     InlineKeyboardButton(
                         text="Создать смету",
                         callback_data=f"estimate:create:{customer_id}",
-                    )
+                    ),
                 ]
             )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Изменить спецификацию",
+                    callback_data=f"customer_edit_spec:{customer_id}",
+                ),
+            ]
+        )
     else:
         rows.append(
             [
@@ -73,30 +77,12 @@ def build_customer_card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_create_estimate_keyboard(customer_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Создать смету",
-                    callback_data=f"estimate:create:{customer_id}",
-                )
-            ]
-        ]
-    )
-
-
-def build_show_estimate_keyboard(customer_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Показать смету",
-                    callback_data=f"estimate:show:{customer_id}",
-                )
-            ]
-        ]
-    )
+async def customer_has_estimate(customer: dict, database: Database) -> bool:
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        return False
+    estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    return bool(estimate)
 
 
 def format_customer_fio(customer: dict) -> str:

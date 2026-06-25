@@ -8,7 +8,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.database import Database
-from app.services.customer_card_service import build_customer_card, build_customer_card_keyboard
+from app.services.customer_card_service import (
+    build_customer_card,
+    build_customer_card_keyboard,
+    customer_has_estimate,
+)
 from app.services.validation_service import (
     normalize_date,
     normalize_department_code,
@@ -73,13 +77,13 @@ async def handle_search_passport(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
-    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
+    has_estimate = await customer_has_estimate(customer, database)
     await message.answer(
         await build_customer_card(customer, database),
         reply_markup=build_customer_card_keyboard(
             customer,
             is_admin=is_admin,
-            has_estimate=bool(estimate),
+            has_estimate=has_estimate,
         ),
     )
 
@@ -170,7 +174,7 @@ async def handle_customer_edit_back(
 
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer_id)
-    estimate = await database.get_estimate_by_customer_id(customer_id)
+    has_estimate = await customer_has_estimate(customer, database)
     await callback.message.answer(
         await build_customer_card(customer, database),
         reply_markup=build_customer_card_keyboard(
@@ -178,7 +182,7 @@ async def handle_customer_edit_back(
             is_admin=await is_admin_for_customer_management(
                 bot, callback.message.chat.id, callback.from_user.id
             ),
-            has_estimate=bool(estimate),
+            has_estimate=has_estimate,
         ),
     )
     await callback.answer()
@@ -236,13 +240,13 @@ async def handle_customer_new_value(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
-    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
+    has_estimate = await customer_has_estimate(customer, database)
     await message.answer(
         await build_customer_card(customer, database),
         reply_markup=build_customer_card_keyboard(
             customer,
             is_admin=is_admin,
-            has_estimate=bool(estimate),
+            has_estimate=has_estimate,
         ),
     )
     await state.set_state(CustomerEditStates.choosing_action)

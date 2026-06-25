@@ -13,6 +13,7 @@ from app.handlers.customers import is_admin_for_customer_management
 from app.services.customer_card_service import (
     build_customer_card,
     build_customer_card_keyboard,
+    customer_has_estimate,
     format_customer_fio,
 )
 from app.services.customer_document_recognition_service import (
@@ -397,14 +398,14 @@ async def handle_add_customer_email(
         is_admin = await is_admin_for_customer_management(
             bot, message.chat.id, message.from_user.id if message.from_user else 0
         )
-        estimate = await database.get_estimate_by_customer_id(int(existing["id"]))
+        has_estimate = await customer_has_estimate(existing, database)
         await message.answer(
             "Клиент с таким паспортом уже существует.\n\n"
             + await build_customer_card(existing, database),
             reply_markup=build_customer_card_keyboard(
                 existing,
                 is_admin=is_admin,
-                has_estimate=bool(estimate),
+                has_estimate=has_estimate,
             ),
         )
         return
@@ -421,13 +422,13 @@ async def handle_add_customer_email(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
-    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
+    has_estimate = await customer_has_estimate(customer, database)
     await message.answer(
         "✅ Клиент добавлен\n\n" + await build_customer_card(customer, database),
         reply_markup=build_customer_card_keyboard(
             customer,
             is_admin=is_admin,
-            has_estimate=bool(estimate),
+            has_estimate=has_estimate,
         ),
     )
 

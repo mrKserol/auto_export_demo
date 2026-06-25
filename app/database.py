@@ -1166,7 +1166,7 @@ class Database:
                 """
                 SELECT * FROM estimates
                 WHERE specification_id = $1
-                ORDER BY id DESC
+                ORDER BY created_at DESC
                 LIMIT 1;
                 """,
                 specification_id,

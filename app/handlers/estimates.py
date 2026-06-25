@@ -8,7 +8,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
-from app.services.customer_card_service import build_show_estimate_keyboard
 from app.services.estimate_excel_generation_service import (
     EstimateExcelTemplateNotFoundError,
     generate_estimate_excel,
@@ -40,12 +39,7 @@ INSURANCE_SHIPMENT_PROMPT = "Введите стоимость страхова�
 CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки"
 CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя"
 SESSION_EXPIRED_REPLY = "Сессия устарела. Начните создание сметы заново."
-ESTIMATE_ALREADY_EXISTS_REPLY = (
-    "Смета для клиента уже создана. Нажмите [Показать смету] или сформируйте договор."
-)
-ESTIMATE_SAVED_REPLY = (
-    "Смета сохранена. Теперь можно сформировать договор или открыть смету из карточки клиента."
-)
+ESTIMATE_REQUIRED_REPLY = "Сначала создайте смету."
 
 
 @router.callback_query(F.data.startswith("estimate:create:"))
@@ -54,11 +48,35 @@ async def handle_estimate_create_start(
     state: FSMContext,
     database: Database,
 ) -> None:
+    await _start_estimate_flow(callback, state, database, recreate=False)
+
+
+@router.callback_query(F.data.startswith("estimate:recreate:"))
+async def handle_estimate_recreate_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+) -> None:
+    await _start_estimate_flow(callback, state, database, recreate=True)
+
+
+async def _start_estimate_flow(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+    *,
+    recreate: bool,
+) -> None:
     if callback.message is None:
         return
 
     parts = callback.data.split(":")
-    if len(parts) != 3 or parts[0] != "estimate" or parts[1] != "create":
+    if len(parts) != 3 or parts[2] == "":
+        await callback.answer("Некорректная команда сметы", show_alert=True)
+        return
+
+    expected_action = "recreate" if recreate else "create"
+    if parts[0] != "estimate" or parts[1] != expected_action:
         await callback.answer("Некорректная команда сметы", show_alert=True)
         return
 
@@ -71,15 +89,6 @@ async def handle_estimate_create_start(
     customer = await database.get_customer_by_id(customer_id)
     if not customer:
         await callback.message.answer("Клиент не найден.")
-        await callback.answer()
-        return
-
-    existing_estimate = await database.get_estimate_by_customer_id(customer_id)
-    if existing_estimate:
-        await callback.message.answer(
-            ESTIMATE_ALREADY_EXISTS_REPLY,
-            reply_markup=build_show_estimate_keyboard(customer_id),
-        )
         await callback.answer()
         return
 
@@ -97,6 +106,16 @@ async def handle_estimate_create_start(
         await callback.answer()
         return
 
+    existing_estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if recreate and not existing_estimate:
+        await callback.message.answer(ESTIMATE_REQUIRED_REPLY)
+        await callback.answer()
+        return
+    if not recreate and existing_estimate:
+        await callback.message.answer("Смета для клиента уже создана. Используйте [Пересоздать смету].")
+        await callback.answer()
+        return
+
     missing_fields = get_missing_specification_fields_for_estimate(specification)
     if missing_fields:
         await callback.message.answer(
@@ -110,6 +129,7 @@ async def handle_estimate_create_start(
     await state.update_data(
         customer_id=customer_id,
         specification_id=int(specification_id),
+        recreate_estimate=recreate,
     )
     await state.set_state(EstimateStates.waiting_engine_power)
     await callback.message.answer("Введите мощность автомобиля в л.с.")
@@ -202,18 +222,10 @@ async def handle_estimate_contractor_comission(
     data = await state.get_data()
     customer_id = data.get("customer_id")
     specification_id = data.get("specification_id")
+    recreate_estimate = bool(data.get("recreate_estimate"))
     if not customer_id or not specification_id:
         await state.clear()
         await message.answer(SESSION_EXPIRED_REPLY)
-        return
-
-    existing_estimate = await database.get_estimate_by_customer_id(int(customer_id))
-    if existing_estimate:
-        await state.clear()
-        await message.answer(
-            ESTIMATE_ALREADY_EXISTS_REPLY,
-            reply_markup=build_show_estimate_keyboard(int(customer_id)),
-        )
         return
 
     parsed_values = _parse_fsm_estimate_values(data)
@@ -236,6 +248,9 @@ async def handle_estimate_contractor_comission(
         await state.clear()
         await message.answer("Спецификация клиента не найдена.")
         return
+
+    if recreate_estimate:
+        await database.delete_estimates_by_specification_id(int(specification_id))
 
     try:
         estimate = await create_estimate(
@@ -260,11 +275,10 @@ async def handle_estimate_contractor_comission(
 
     await state.clear()
     await message.answer(format_estimate_summary(estimate, specification))
-    await message.answer(ESTIMATE_SAVED_REPLY)
 
 
-@router.callback_query(F.data.startswith("estimate:show:"))
-async def handle_estimate_show(callback: CallbackQuery, database: Database) -> None:
+@router.callback_query(F.data.startswith("estimate:file:"))
+async def handle_estimate_file(callback: CallbackQuery, database: Database) -> None:
     if callback.message is None:
         return
 
@@ -279,30 +293,29 @@ async def handle_estimate_show(callback: CallbackQuery, database: Database) -> N
         await callback.answer("Некорректный ID клиента", show_alert=True)
         return
 
-    estimate = await database.get_estimate_by_customer_id(customer_id)
-    if not estimate:
-        await callback.message.answer("Смета для клиента ещё не создана.")
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer or not customer.get("specification_id"):
+        await callback.message.answer("У клиента нет спецификации авто.")
         await callback.answer()
         return
 
-    specification = await _load_specification_for_estimate(database, estimate)
+    estimate = await database.get_estimate_by_specification_id(int(customer["specification_id"]))
+    if not estimate:
+        await callback.message.answer(ESTIMATE_REQUIRED_REPLY)
+        await callback.answer()
+        return
+
+    specification = await database.get_specification_by_id(int(customer["specification_id"]))
     sent = await _send_estimate_excel(callback.message, estimate, specification)
+    if sent:
+        await callback.message.answer("Готово. Смета сформирована.")
     await callback.answer("Не удалось отправить смету." if not sent else None)
-
-
-async def _load_specification_for_estimate(database: Database, estimate: dict) -> dict | None:
-    specification_id = estimate.get("specification_id")
-    if not specification_id:
-        return None
-    return await database.get_specification_by_id(int(specification_id))
 
 
 async def _send_estimate_excel(
     message: Message,
     estimate: dict,
     specification: dict | None,
-    *,
-    caption: str = "Смета Excel.",
 ) -> bool:
     try:
         file_path = generate_estimate_excel(estimate, specification)
@@ -314,7 +327,7 @@ async def _send_estimate_excel(
         await message.answer("Не удалось сформировать Excel-смету. Проверьте шаблон.")
         return False
 
-    await message.answer_document(FSInputFile(file_path), caption=caption)
+    await message.answer_document(FSInputFile(file_path))
     return True
 
 
