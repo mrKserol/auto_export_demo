@@ -18,7 +18,7 @@ from app.services.customer_card_service import (
 from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
-from app.services.customer_extraction_service import person_names_match
+from app.services.customer_extraction_service import format_fio_normalized, person_names_match
 from app.services.file_service import (
     build_stored_filename,
     get_original_filename,
@@ -207,6 +207,11 @@ async def handle_snils_upload(
         return
 
     if not person_names_match(customer_fields, snils_fields):
+        logger.warning(
+            "SNILS name mismatch: passport_fio=%s, snils_fio=%s",
+            format_fio_normalized(customer_fields),
+            format_fio_normalized(snils_fields),
+        )
         await message.answer(
             "ФИО не совпадает, загрузите соответствующий файл.",
             reply_markup=_manual_snils_keyboard(),
@@ -281,6 +286,11 @@ async def handle_tin_upload(
         return
 
     if not person_names_match(customer_fields, tin_fields):
+        logger.warning(
+            "TIN name mismatch: passport_fio=%s, tin_fio=%s",
+            format_fio_normalized(customer_fields),
+            format_fio_normalized(tin_fields),
+        )
         await message.answer(
             "ФИО не совпадает, загрузите соответствующий файл.",
             reply_markup=_manual_tin_keyboard(),

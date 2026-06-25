@@ -108,6 +108,61 @@ def extract_tin_fields(response_json: dict) -> dict:
 
 
 def person_names_match(passport_fields: dict, document_fields: dict) -> bool:
+    if _strict_names_match(passport_fields, document_fields):
+        return True
+
+    passport_last = _normalize_name_part(passport_fields.get("last_name"))
+    passport_first = _normalize_name_part(passport_fields.get("first_name"))
+    passport_surname = _normalize_name_part(passport_fields.get("surname"))
+    passport_tokens = {
+        token for token in (passport_last, passport_first, passport_surname) if token
+    }
+
+    document_tokens = _collect_name_tokens(document_fields)
+    if not passport_tokens or not document_tokens:
+        return False
+
+    if (
+        passport_last
+        and passport_first
+        and passport_last in document_tokens
+        and passport_first in document_tokens
+    ):
+        return True
+
+    document_last = _normalize_name_part(document_fields.get("last_name"))
+    document_first = _normalize_name_part(document_fields.get("first_name"))
+    if (
+        document_last
+        and document_first
+        and document_last in passport_tokens
+        and document_first in passport_tokens
+    ):
+        return True
+
+    intersection = passport_tokens & document_tokens
+    if len(intersection) >= 2 and passport_last and passport_last in intersection:
+        return True
+
+    return False
+
+
+def format_fio_normalized(fields: dict) -> str:
+    parts = [
+        _normalize_name_part(fields.get("last_name")),
+        _normalize_name_part(fields.get("first_name")),
+        _normalize_name_part(fields.get("surname")),
+    ]
+    structured = " ".join(part for part in parts if part)
+    full_name_raw = _normalize_name_part(fields.get("full_name_raw"))
+    if full_name_raw and structured:
+        return f"{structured} | raw={full_name_raw}"
+    if full_name_raw:
+        return full_name_raw
+    return structured or "—"
+
+
+def _strict_names_match(passport_fields: dict, document_fields: dict) -> bool:
     for key in ("last_name", "first_name"):
         passport_value = _normalize_name_part(passport_fields.get(key))
         document_value = _normalize_name_part(document_fields.get(key))
@@ -119,6 +174,21 @@ def person_names_match(passport_fields: dict, document_fields: dict) -> bool:
     if passport_surname and document_surname and passport_surname != document_surname:
         return False
     return True
+
+
+def _collect_name_tokens(document_fields: dict) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("last_name", "first_name", "surname"):
+        part = _normalize_name_part(document_fields.get(key))
+        if part:
+            tokens.add(part)
+
+    full_name_raw = _normalize_name_part(document_fields.get("full_name_raw"))
+    if full_name_raw:
+        for token in full_name_raw.split():
+            if token:
+                tokens.add(token)
+    return tokens
 
 
 def merge_customer_fields(current: dict, incoming: dict) -> tuple[dict, list[str]]:

@@ -120,6 +120,7 @@ OCR текст документа:
 Верни только валидный JSON без markdown и без пояснений в таком формате:
 {{
   "document_type": "snils",
+  "full_name_raw": null,
   "last_name": null,
   "first_name": null,
   "surname": null,
@@ -133,6 +134,12 @@ OCR текст документа:
 
 Правила:
 - Извлеки ФИО и номер СНИЛС.
+- ФИО в российских документах обычно указано в порядке: Фамилия Имя Отчество.
+- last_name = Фамилия.
+- first_name = Имя.
+- surname = Отчество.
+- Не меняй местами имя и фамилию.
+- Если ФИО найдено одной строкой, запиши исходную строку в full_name_raw.
 - СНИЛС верни строго в формате "123-456-789 00".
 - Не придумывай данные.
 - Если поле не найдено — null.
@@ -148,6 +155,7 @@ OCR текст документа:
 Верни только валидный JSON без markdown и без пояснений в таком формате:
 {{
   "document_type": "tin",
+  "full_name_raw": null,
   "last_name": null,
   "first_name": null,
   "surname": null,
@@ -161,6 +169,12 @@ OCR текст документа:
 
 Правила:
 - Извлеки ФИО и ИНН.
+- ФИО в российских документах обычно указано в порядке: Фамилия Имя Отчество.
+- last_name = Фамилия.
+- first_name = Имя.
+- surname = Отчество.
+- Не меняй местами имя и фамилию.
+- Если ФИО найдено одной строкой, запиши исходную строку в full_name_raw.
 - ИНН верни только цифрами.
 - Для физлица обычно 12 цифр.
 - Не придумывай данные.
@@ -359,18 +373,20 @@ def _postprocess_passport_registration(
 
 def _postprocess_snils(gpt_json: dict, ocr_text: str) -> dict:
     fields = {
+        "full_name_raw": _clean_text(gpt_json.get("full_name_raw")),
         "first_name": _clean_text(gpt_json.get("first_name")),
         "last_name": _clean_text(gpt_json.get("last_name")),
         "surname": _clean_text(gpt_json.get("surname")),
         "ipain": normalize_snils(_clean_text(gpt_json.get("ipain"))),
     }
+    _apply_full_name_raw(fields)
 
     fallback = extract_snils_fields({"ocr_text": ocr_text})
     for key, value in fallback.items():
         if value and not fields.get(key):
             fields[key] = value
 
-    if not fields["ipain"]:
+    if not fields.get("ipain"):
         snils_match = re.search(
             r"\b(\d{3})[-\s]?(\d{3})[-\s]?(\d{3})[-\s]?(\d{2})\b",
             ocr_text,
@@ -385,18 +401,20 @@ def _postprocess_snils(gpt_json: dict, ocr_text: str) -> dict:
 
 def _postprocess_tin(gpt_json: dict, ocr_text: str) -> dict:
     fields = {
+        "full_name_raw": _clean_text(gpt_json.get("full_name_raw")),
         "first_name": _clean_text(gpt_json.get("first_name")),
         "last_name": _clean_text(gpt_json.get("last_name")),
         "surname": _clean_text(gpt_json.get("surname")),
         "tin": normalize_tin(_clean_text(gpt_json.get("tin"))),
     }
+    _apply_full_name_raw(fields)
 
     fallback = extract_tin_fields({"ocr_text": ocr_text})
     for key, value in fallback.items():
         if value and not fields.get(key):
             fields[key] = value
 
-    if not fields["tin"]:
+    if not fields.get("tin"):
         inn_match = re.search(r"\b(\d{12})\b", ocr_text)
         if inn_match:
             fields["tin"] = normalize_tin(inn_match.group(1))
@@ -406,6 +424,21 @@ def _postprocess_tin(gpt_json: dict, ocr_text: str) -> dict:
                 fields["tin"] = normalize_tin(inn_match_10.group(1))
 
     return {key: value for key, value in fields.items() if value}
+
+
+def _apply_full_name_raw(fields: dict) -> None:
+    full_name_raw = fields.get("full_name_raw")
+    has_structured = any(fields.get(key) for key in ("last_name", "first_name", "surname"))
+    if has_structured or not full_name_raw:
+        return
+
+    tokens = full_name_raw.split()
+    if len(tokens) >= 1:
+        fields["last_name"] = tokens[0]
+    if len(tokens) >= 2:
+        fields["first_name"] = tokens[1]
+    if len(tokens) >= 3:
+        fields["surname"] = tokens[2]
 
 
 def _build_registration_address_from_gpt(gpt_json: dict) -> str | None:
