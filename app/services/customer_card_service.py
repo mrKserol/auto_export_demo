@@ -77,6 +77,23 @@ def build_customer_card_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def build_estimate_actions_keyboard(customer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Договор",
+                    callback_data=f"contract:generate:{customer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Смета",
+                    callback_data=f"estimate:file:{customer_id}",
+                ),
+            ]
+        ]
+    )
+
+
 async def customer_has_estimate(customer: dict, database: Database) -> bool:
     specification_id = customer.get("specification_id")
     if not specification_id:

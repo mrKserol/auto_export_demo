@@ -7,14 +7,14 @@ SPEC_FIELD_LABELS = {
     "brand": "Марка",
     "model": "Модель",
     "year": "Год",
-    "eng_capacity": "Объём",
+    "eng_capacity": "Объём двигателя в литрах",
     "eng_type": "Тип ДВС",
     "drive": "Привод",
     "transmission": "КПП",
     "color": "Цвет",
     "complectation": "Комплектация",
-    "mileage": "Пробег",
-    "price": "Бюджет",
+    "mileage": "Пробег в км.",
+    "price": "Бюджет / стоимость",
 }
 
 SPEC_EDIT_BUTTON_LABELS = {

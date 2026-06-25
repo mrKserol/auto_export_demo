@@ -23,6 +23,7 @@ from app.services.customer_card_service import (
     build_customer_card_keyboard,
     customer_has_estimate,
 )
+from app.services.estimate_service import DEFAULT_PRICE_CURRENCY
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
     build_specification_edit_keyboard,
@@ -287,7 +288,9 @@ async def handle_edit_spec_field(
         field_name=field_name,
     )
     await callback.message.answer(
-        f"Введите новое значение для поля: {SPEC_FIELD_LABELS[field_name]}"
+        f"Введите новое значение для поля: Бюджет / стоимость в валюте {DEFAULT_PRICE_CURRENCY}"
+        if field_name == "price"
+        else f"Введите новое значение для поля: {SPEC_FIELD_LABELS[field_name]}"
     )
     await callback.answer()
 
@@ -383,7 +386,7 @@ async def handle_spec_model(message: Message, state: FSMContext) -> None:
 @router.message(StateFilter(SpecificationAddStates.waiting_year), F.text)
 async def handle_spec_year(message: Message, state: FSMContext) -> None:
     await _save_spec_field_and_ask_next(
-        message, state, "year", SpecificationAddStates.waiting_eng_capacity, "Объём двигателя"
+        message, state, "year", SpecificationAddStates.waiting_eng_capacity, "Объём двигателя в литрах"
     )
 
 
@@ -425,14 +428,18 @@ async def handle_spec_color(message: Message, state: FSMContext) -> None:
 @router.message(StateFilter(SpecificationAddStates.waiting_complectation), F.text)
 async def handle_spec_complectation(message: Message, state: FSMContext) -> None:
     await _save_spec_field_and_ask_next(
-        message, state, "complectation", SpecificationAddStates.waiting_mileage, "Пробег"
+        message, state, "complectation", SpecificationAddStates.waiting_mileage, "Пробег в км."
     )
 
 
 @router.message(StateFilter(SpecificationAddStates.waiting_mileage), F.text)
 async def handle_spec_mileage(message: Message, state: FSMContext) -> None:
     await _save_spec_field_and_ask_next(
-        message, state, "mileage", SpecificationAddStates.waiting_price, "Бюджет / стоимость"
+        message,
+        state,
+        "mileage",
+        SpecificationAddStates.waiting_price,
+        f"Бюджет / стоимость в валюте {DEFAULT_PRICE_CURRENCY}",
     )
 
 

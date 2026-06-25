@@ -8,11 +8,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
+from app.services.customer_card_service import build_estimate_actions_keyboard
 from app.services.estimate_excel_generation_service import (
     EstimateExcelTemplateNotFoundError,
     generate_estimate_excel,
 )
 from app.services.estimate_service import (
+    DEFAULT_PRICE_CURRENCY,
     create_estimate,
     format_estimate_summary,
     get_missing_specification_fields_for_estimate,
@@ -30,14 +32,18 @@ INVALID_NON_NEGATIVE_REPLY = "Введите положительное числ
 EXCHANGE_RATE_PROMPT = (
     "Введите курс валюты к рублю. Например: 12.1 для CNY или 0.57 для JPY."
 )
-INSPECT_TRANSPORT_PROMPT = "Введите стоимость осмотра и транспортировки в КНР"
+INSPECT_TRANSPORT_PROMPT_TEMPLATE = (
+    "Введите стоимость осмотра и транспортировки в КНР в валюте {currency}"
+)
 TRANSIT_DECLARATION_PROMPT = (
     "Введите стоимость приемки в РК и оформление транзитной декларации "
-    "в республике Казахстан."
+    "в республике Казахстан в рублях"
 )
-INSURANCE_SHIPMENT_PROMPT = "Введите стоимость страхования и доставки до города назначения"
-CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки"
-CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя"
+INSURANCE_SHIPMENT_PROMPT = (
+    "Введите стоимость страхования и доставки до города назначения в рублях"
+)
+CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки в рублях"
+CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя в рублях"
 SESSION_EXPIRED_REPLY = "Сессия устарела. Начните создание сметы заново."
 ESTIMATE_REQUIRED_REPLY = "Сначала создайте смету."
 
@@ -125,11 +131,17 @@ async def _start_estimate_flow(
         await callback.answer()
         return
 
+    price_currency = (
+        (specification.get("price_currency") or DEFAULT_PRICE_CURRENCY).strip()
+        or DEFAULT_PRICE_CURRENCY
+    )
+
     await state.clear()
     await state.update_data(
         customer_id=customer_id,
         specification_id=int(specification_id),
         recreate_estimate=recreate,
+        price_currency=price_currency,
     )
     await state.set_state(EstimateStates.waiting_engine_power)
     await callback.message.answer("Введите мощность автомобиля в л.с.")
@@ -157,7 +169,11 @@ async def handle_estimate_exchange_rate(message: Message, state: FSMContext) -> 
 
     await state.update_data(exchange_rate=str(exchange_rate))
     await state.set_state(EstimateStates.waiting_inspect_transport_price)
-    await message.answer(INSPECT_TRANSPORT_PROMPT)
+    data = await state.get_data()
+    currency = data.get("price_currency") or DEFAULT_PRICE_CURRENCY
+    await message.answer(
+        INSPECT_TRANSPORT_PROMPT_TEMPLATE.format(currency=currency)
+    )
 
 
 @router.message(StateFilter(EstimateStates.waiting_inspect_transport_price), F.text)
@@ -274,7 +290,10 @@ async def handle_estimate_contractor_comission(
         return
 
     await state.clear()
-    await message.answer(format_estimate_summary(estimate, specification))
+    await message.answer(
+        format_estimate_summary(estimate, specification),
+        reply_markup=build_estimate_actions_keyboard(int(customer_id)),
+    )
 
 
 @router.callback_query(F.data.startswith("estimate:file:"))
