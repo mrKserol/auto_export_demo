@@ -195,7 +195,21 @@ OCR текст:
 }}
 Правила:
 - passport_main: паспорт РФ, разворот с фотографией и основными данными владельца, есть ФИО, дата рождения, кем выдан, дата выдачи, код подразделения.
-- passport_registration: страница паспорта РФ с регистрацией/местом жительства, штампы "ЗАРЕГИСТРИРОВАН", "СНЯТ С РЕГИСТРАЦИОННОГО УЧЕТА", адрес регистрации.
+- passport_registration: это любая страница паспорта РФ со штампами регистрации или снятия с регистрационного учета.
+  Признаки страницы регистрации:
+  - крупное слово "ЗАРЕГИСТРИРОВАН"
+  - "СНЯТ С РЕГИСТРАЦИОННОГО УЧЕТА"
+  - "место жительства"
+  - "регистрационного учета"
+  - "отделение по району"
+  - рукописные строки адреса
+  - строки с "рег-н", "р-н", "пункт", "ул", "дом", "корп", "кв"
+  - несколько прямоугольных штампов на странице паспорта
+  Даже если текст распознан плохо, но видны признаки штампов регистрации паспорта, вернуть passport_registration.
+  Не требуй наличие номера паспорта на странице регистрации.
+  Не требуй наличие полного адреса.
+  Если есть признаки регистрации и нет явных признаков СНИЛС/ИНН, выбирай passport_registration.
+  Если документ похож на страницу паспорта со штампами, но OCR не уверен, всё равно верни passport_registration с confidence 0.55-0.7, а не unknown.
 - snils: документ СНИЛС, есть номер формата 123-456-789 00 или текст "страховой номер индивидуального лицевого счета".
 - tin: ИНН физического лица, есть 12-значный ИНН или текст "свидетельство о постановке на учет".
 - mixed: если в OCR-тексте признаки нескольких документов одновременно.
@@ -246,7 +260,7 @@ class CustomerDocumentRecognitionService:
             filename=filename,
         )
         guard = await self._detect_document_type_from_ocr(ocr_text)
-        if not _is_document_type_allowed(guard, "passport_registration"):
+        if not _is_registration_document_type_allowed(guard, ocr_text):
             return _build_document_type_mismatch("passport_registration", guard)
 
         gpt_json = await self._run_gpt(
@@ -430,6 +444,78 @@ def _is_document_type_allowed(guard: dict, expected_document_type: str) -> bool:
     if document_type in {"mixed", "unknown"}:
         return False
     return document_type == expected_document_type
+
+
+def _is_registration_document_type_allowed(guard: dict, ocr_text: str) -> bool:
+    detected_type = guard.get("document_type")
+
+    if detected_type in {"snils", "tin", "passport_main"}:
+        return False
+
+    if detected_type == "passport_registration":
+        return True
+
+    if detected_type == "unknown":
+        return _looks_like_registration_page(ocr_text)
+
+    if detected_type == "mixed":
+        detected_types = _extract_detected_document_types(guard.get("detected_documents"))
+        has_registration = "passport_registration" in detected_types
+        has_snils_or_tin = "snils" in detected_types or "tin" in detected_types
+        if has_snils_or_tin:
+            return False
+        if has_registration:
+            return True
+        return _looks_like_registration_page(ocr_text)
+
+    return _looks_like_registration_page(ocr_text)
+
+
+def _extract_detected_document_types(detected_documents: object) -> set[str]:
+    if not isinstance(detected_documents, list):
+        return set()
+
+    types: set[str] = set()
+    for item in detected_documents:
+        if isinstance(item, str):
+            normalized = item.strip().lower()
+            if normalized:
+                types.add(normalized)
+            continue
+        if isinstance(item, dict):
+            doc_type = item.get("document_type") or item.get("type")
+            if doc_type:
+                types.add(str(doc_type).strip().lower())
+    return types
+
+
+def _looks_like_registration_page(ocr_text: str) -> bool:
+    text = (ocr_text or "").upper().replace("Ё", "Е")
+
+    strong_markers = [
+        "ЗАРЕГИСТРИРОВАН",
+        "РЕГИСТРИРОВАН",
+        "СНЯТ С РЕГИСТРАЦИОННОГО УЧЕТА",
+        "РЕГИСТРАЦИОННОГО УЧЕТА",
+        "МЕСТО ЖИТЕЛЬСТВА",
+    ]
+
+    weak_markers = [
+        "ОТДЕЛЕНИЕ",
+        "РАЙОН",
+        "УЛ",
+        "ДОМ",
+        "КОРП",
+        "КВ",
+        "ПОДПИСЬ",
+        "ФАМИЛИЯ",
+    ]
+
+    if any(marker in text for marker in strong_markers):
+        return True
+
+    weak_count = sum(1 for marker in weak_markers if marker in text)
+    return weak_count >= 3
 
 
 def _build_document_type_mismatch(expected_document_type: str, guard: dict) -> dict:
