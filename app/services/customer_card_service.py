@@ -14,21 +14,13 @@ def build_customer_card_keyboard(customer: dict, *, is_admin: bool) -> InlineKey
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Сформировать договор",
-                    callback_data=f"customer_generate_contract:{customer_id}",
+                    text="Сформировать договор и смету",
+                    callback_data=f"estimate_contract:create:{customer_id}",
                 ),
                 InlineKeyboardButton(
                     text="Изменить спецификацию",
                     callback_data=f"customer_edit_spec:{customer_id}",
                 ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="Создать смету",
-                    callback_data=f"estimate:create:{customer_id}",
-                )
             ]
         )
     else:

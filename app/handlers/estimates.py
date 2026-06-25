@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
+from app.services.contract_generation_service import (
+    CustomerNotFoundError,
+    CustomerSpecificationMissingError,
+    SpecificationNotFoundError,
+    TemplateNotFoundError,
+    generate_customer_contract_docx,
+)
 from app.services.estimate_service import (
     create_estimate,
     format_estimate_summary,
@@ -17,6 +26,7 @@ from app.states.estimate_states import EstimateStates
 
 
 router = Router(name="estimates")
+logger = logging.getLogger(__name__)
 
 INVALID_NUMBER_REPLY = "Введите число, например 110"
 INVALID_NON_NEGATIVE_REPLY = "Введите положительное число или 0."
@@ -32,6 +42,24 @@ INSURANCE_SHIPMENT_PROMPT = "Введите стоимость страхова�
 CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки"
 CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя"
 SESSION_EXPIRED_REPLY = "Сессия устарела. Начните создание сметы заново."
+CONTRACT_GENERATION_FAILED_REPLY = (
+    "Смета создана, но договор не удалось сформировать. "
+    "Проверьте шаблон договора или данные клиента."
+)
+
+
+@router.callback_query(F.data.startswith("estimate_contract:create:"))
+async def handle_estimate_contract_create_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+) -> None:
+    await _start_estimate_flow(
+        callback,
+        state,
+        database,
+        generate_contract_after_estimate=True,
+    )
 
 
 @router.callback_query(F.data.startswith("estimate:create:"))
@@ -40,11 +68,26 @@ async def handle_estimate_create_start(
     state: FSMContext,
     database: Database,
 ) -> None:
+    await _start_estimate_flow(
+        callback,
+        state,
+        database,
+        generate_contract_after_estimate=False,
+    )
+
+
+async def _start_estimate_flow(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+    *,
+    generate_contract_after_estimate: bool,
+) -> None:
     if callback.message is None:
         return
 
     parts = callback.data.split(":")
-    if len(parts) != 3 or parts[0] != "estimate" or parts[1] != "create":
+    if len(parts) != 3 or parts[2] == "":
         await callback.answer("Некорректная команда сметы", show_alert=True)
         return
 
@@ -87,6 +130,7 @@ async def handle_estimate_create_start(
     await state.update_data(
         customer_id=customer_id,
         specification_id=int(specification_id),
+        generate_contract_after_estimate=generate_contract_after_estimate,
     )
     await state.set_state(EstimateStates.waiting_engine_power)
     await callback.message.answer("Введите мощность автомобиля в л.с.")
@@ -179,6 +223,7 @@ async def handle_estimate_contractor_comission(
     data = await state.get_data()
     customer_id = data.get("customer_id")
     specification_id = data.get("specification_id")
+    generate_contract_after_estimate = bool(data.get("generate_contract_after_estimate"))
     if not customer_id or not specification_id:
         await state.clear()
         await message.answer(SESSION_EXPIRED_REPLY)
@@ -227,7 +272,66 @@ async def handle_estimate_contractor_comission(
         return
 
     await state.clear()
+
+    if generate_contract_after_estimate:
+        await _send_estimate_with_contract(
+            message,
+            customer_id=int(customer_id),
+            database=database,
+            estimate=estimate,
+            specification=specification,
+        )
+        return
+
     await message.answer(format_estimate_summary(estimate, specification))
+
+
+async def _send_estimate_with_contract(
+    message: Message,
+    *,
+    customer_id: int,
+    database: Database,
+    estimate: dict,
+    specification: dict,
+) -> None:
+    contract_file_path: str | None = None
+    try:
+        contract_file_path = await generate_customer_contract_docx(
+            customer_id,
+            database,
+            estimate=estimate,
+        )
+    except (
+        CustomerNotFoundError,
+        CustomerSpecificationMissingError,
+        SpecificationNotFoundError,
+        TemplateNotFoundError,
+    ) as error:
+        logger.exception(
+            "Contract generation failed after estimate for customer_id=%s: %s",
+            customer_id,
+            error,
+        )
+    except Exception:
+        logger.exception(
+            "Contract generation failed after estimate for customer_id=%s",
+            customer_id,
+        )
+
+    summary = format_estimate_summary(estimate, specification)
+    if contract_file_path:
+        summary = summary.replace("Смета создана.", "Смета и договор сформированы.", 1)
+
+    await message.answer(summary)
+
+    if contract_file_path:
+        await message.answer_document(
+            FSInputFile(contract_file_path),
+            caption="Готово. Договор сформирован.",
+        )
+        return
+
+    await message.answer(CONTRACT_GENERATION_FAILED_REPLY)
 
 
 def _parse_fsm_estimate_values(data: dict) -> tuple | None:
