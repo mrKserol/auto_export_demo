@@ -590,6 +590,13 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
     if not fields.get("passport"):
         logger.warning("Passport number not found after simplified extraction")
 
+    if fields.get("passport"):
+        fields["passport"] = _fix_reversed_passport_series_pair(
+            fields["passport"],
+            ocr_text,
+            fields.get("date_issue"),
+        )
+
     return {key: value for key, value in fields.items() if value}
 
 
@@ -695,6 +702,59 @@ def _extract_passport_side_number_simple(ocr_text: str) -> str | None:
             return normalize_passport(candidate)
 
     return None
+
+
+def _reverse_pair(pair: str) -> str:
+    return pair[::-1]
+
+
+def _issue_year_last_two_digits(date_issue: str | None) -> str | None:
+    if not date_issue:
+        return None
+    match = re.search(r"\d{2}\.\d{2}\.(\d{4})", date_issue)
+    if not match:
+        return None
+    return match.group(1)[-2:]
+
+
+def _fix_reversed_passport_series_pair(
+    passport: str | None,
+    ocr_text: str,
+    date_issue: str | None = None,
+) -> str | None:
+    digits = re.sub(r"\D", "", passport or "")
+    if len(digits) != 10:
+        return passport
+
+    first_pair = digits[:2]
+    second_pair = digits[2:4]
+    number = digits[4:]
+
+    text_without_mrz = _remove_mrz_lines(ocr_text)
+    all_digit_tokens = re.findall(r"\d+", text_without_mrz)
+
+    reversed_first_pair = _reverse_pair(first_pair)
+    if reversed_first_pair == first_pair:
+        return normalize_passport(digits)
+
+    if reversed_first_pair not in all_digit_tokens:
+        return normalize_passport(digits)
+
+    issue_year_last_two = _issue_year_last_two_digits(date_issue)
+    if issue_year_last_two and second_pair != issue_year_last_two:
+        logger.info(
+            "Passport series pair fix: date_issue year suffix %s does not match second pair %s",
+            issue_year_last_two,
+            second_pair,
+        )
+
+    fixed_digits = reversed_first_pair + second_pair + number
+    logger.info(
+        "Passport series pair corrected from %s to %s based on OCR tokens",
+        first_pair,
+        reversed_first_pair,
+    )
+    return normalize_passport(fixed_digits)
 
 
 def _postprocess_passport_registration(
