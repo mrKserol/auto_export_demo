@@ -189,6 +189,21 @@ PASSPORT_MAIN_OCR_KEYWORDS = {
     "RUS": 1,
 }
 
+TIN_OCR_KEYWORDS = {
+    "ИНН": 8,
+    "НАЛОГ": 6,
+    "НАЛОГОПЛАТЕЛЬЩИК": 6,
+    "НАЛОГОВОМ": 5,
+    "СВИДЕТЕЛЬСТВО": 5,
+    "ПОСТАНОВКЕ НА УЧЕТ": 6,
+    "ПО МЕСТУ ЖИТЕЛЬСТВА": 3,
+    "РОССИЙСКАЯ ФЕДЕРАЦИЯ": 2,
+    "МИНИСТЕРСТВО": 2,
+    "ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ": 6,
+    "ИДЕНТИФИКАЦИОННЫЙ НОМЕР": 6,
+    "НОМЕР НАЛОГОПЛАТЕЛЬЩИКА": 6,
+}
+
 
 def _prepare_rotated_image_bytes_candidates(
     file_content: bytes,
@@ -227,7 +242,35 @@ def _score_ocr_text(text: str, score_profile: str) -> float:
             score *= 0.2
         return score
 
+    if score_profile == "tin":
+        upper_text = text.upper().replace("Ё", "Е")
+        score = sum(
+            weight for keyword, weight in TIN_OCR_KEYWORDS.items() if keyword in upper_text
+        )
+        if _has_tin_number_pattern(text):
+            score += 10
+        score += min(len(text) / 100, 20)
+        if len(text) < 30:
+            score *= 0.2
+        return score
+
     return float(len(text))
+
+
+def _has_tin_number_pattern(text: str) -> bool:
+    if re.search(r"(?<!\d)\d{12}(?!\d)", text):
+        return True
+
+    groups = re.findall(r"\d+", text)
+    for start in range(len(groups)):
+        combined = ""
+        for group in groups[start:]:
+            combined += group
+            if len(combined) == 12:
+                return True
+            if len(combined) > 12:
+                break
+    return False
 
 
 def _has_passport_side_number_pattern(text: str) -> bool:

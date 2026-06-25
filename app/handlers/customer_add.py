@@ -758,7 +758,9 @@ def _format_document_type_mismatch_message(
     if expected_document_type == "tin":
         return (
             "Похоже, это не ИНН.\n"
-            "Сейчас нужен: один файл ИНН."
+            "Сейчас нужен: один файл ИНН.\n"
+            "Если это старый ИНН, попробуйте сфотографировать документ ровно сверху, "
+            "чтобы номер был читаем."
         )
 
     expected_label = labels.get(expected_document_type, expected_document_type)

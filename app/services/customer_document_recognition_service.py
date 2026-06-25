@@ -226,7 +226,16 @@ OCR текст:
   Если есть признаки регистрации и нет явных признаков СНИЛС/ИНН, выбирай passport_registration.
   Если документ похож на страницу паспорта со штампами, но OCR не уверен, всё равно верни passport_registration с confidence 0.55-0.7, а не unknown.
 - snils: документ СНИЛС, есть номер формата 123-456-789 00 или текст "страховой номер индивидуального лицевого счета".
-- tin: ИНН физического лица, есть 12-значный ИНН или текст "свидетельство о постановке на учет".
+- tin: документ ИНН физического лица; новый или старый образец.
+  Может называться "Свидетельство о постановке на учет в налоговом органе".
+  Может содержать "Министерство Российской Федерации по налогам и сборам".
+  Может содержать "Федеральная налоговая служба".
+  Может содержать "идентификационный номер налогоплательщика".
+  Может содержать 12-значный номер ИНН.
+  Номер может быть записан группами, например: 02 74 041906 98 или 523501879144.
+  Если есть ФИО человека и 12-значный номер рядом с признаками налогового документа — это tin.
+  Не требуй точной фразы "ИНН".
+  Если документ похож на старое свидетельство ИНН, верни tin.
 - mixed: если в OCR-тексте признаки нескольких документов одновременно.
 - unknown: если тип определить нельзя.
 - Не придумывай данные.
@@ -312,9 +321,15 @@ class CustomerDocumentRecognitionService:
         *,
         filename: str | None = None,
     ) -> dict:
-        ocr_text = await self._run_ocr("tin", file_content, mime_type, filename=filename)
+        ocr_text = await self._run_ocr_with_rotation(
+            "tin",
+            file_content,
+            mime_type,
+            filename=filename,
+            score_profile="tin",
+        )
         guard = await self._detect_document_type_from_ocr(ocr_text)
-        if not _is_document_type_allowed(guard, "tin"):
+        if not _is_tin_document_type_allowed(guard, ocr_text):
             return _build_document_type_mismatch("tin", guard)
 
         gpt_json = await self._run_gpt("tin", TIN_PROMPT, ocr_text)
@@ -487,6 +502,74 @@ def _is_registration_document_type_allowed(guard: dict, ocr_text: str) -> bool:
         return _looks_like_registration_page(ocr_text)
 
     return _looks_like_registration_page(ocr_text)
+
+
+def _is_tin_document_type_allowed(guard: dict, ocr_text: str) -> bool:
+    detected_type = guard.get("document_type")
+
+    if detected_type in {"snils", "passport_main", "passport_registration"}:
+        return False
+
+    if detected_type == "tin":
+        return True
+
+    if detected_type == "unknown":
+        return _looks_like_tin_document(ocr_text)
+
+    if detected_type == "mixed":
+        detected_types = _extract_detected_document_types(guard.get("detected_documents"))
+        if (
+            "snils" in detected_types
+            or "passport_main" in detected_types
+            or "passport_registration" in detected_types
+        ):
+            return False
+        if "tin" in detected_types:
+            return True
+        return _looks_like_tin_document(ocr_text)
+
+    return _looks_like_tin_document(ocr_text)
+
+
+def _looks_like_tin_document(ocr_text: str) -> bool:
+    text = (ocr_text or "").upper().replace("Ё", "Е")
+
+    if re.search(
+        r"\b\d{3}[-\s]?\d{3}[-\s]?\d{3}[-\s]?\d{2}\b",
+        text,
+    ):
+        return False
+
+    strong_markers = [
+        "ИНН",
+        "НАЛОГОПЛАТЕЛЬЩИК",
+        "НАЛОГОВ",
+        "СВИДЕТЕЛЬСТВО",
+        "ПОСТАНОВКЕ НА УЧЕТ",
+        "ФЕДЕРАЛЬНОЙ НАЛОГОВОЙ СЛУЖБЫ",
+        "ИДЕНТИФИКАЦИОННЫЙ НОМЕР",
+        "МИНИСТЕРСТВО РОССИЙСКОЙ ФЕДЕРАЦИИ ПО НАЛОГАМ",
+    ]
+
+    if any(marker in text for marker in strong_markers):
+        return True
+
+    digit_groups = re.findall(r"\d+", text)
+    joined = "".join(digit_groups)
+
+    if re.search(r"\d{12}", joined):
+        weak_markers = [
+            "РОССИЙСКАЯ ФЕДЕРАЦИЯ",
+            "БАШКОРТОСТАН",
+            "ВЫДАН",
+            "ФАМИЛИЯ",
+            "ИМЯ",
+            "ОТЧЕСТВО",
+        ]
+        weak_count = sum(1 for marker in weak_markers if marker in text)
+        return weak_count >= 2
+
+    return False
 
 
 def _extract_detected_document_types(detected_documents: object) -> set[str]:
@@ -842,12 +925,36 @@ def _postprocess_tin(gpt_json: dict, ocr_text: str) -> dict:
         inn_match = re.search(r"\b(\d{12})\b", ocr_text)
         if inn_match:
             fields["tin"] = normalize_tin(inn_match.group(1))
-        else:
-            inn_match_10 = re.search(r"\b(\d{10})\b", ocr_text)
-            if inn_match_10:
-                fields["tin"] = normalize_tin(inn_match_10.group(1))
+
+    if not fields.get("tin"):
+        grouped_tin = _extract_tin_from_grouped_digits(ocr_text)
+        if grouped_tin:
+            fields["tin"] = grouped_tin
+
+    if not fields.get("tin"):
+        inn_match_10 = re.search(r"\b(\d{10})\b", ocr_text)
+        if inn_match_10:
+            fields["tin"] = normalize_tin(inn_match_10.group(1))
 
     return {key: value for key, value in fields.items() if value}
+
+
+def _extract_tin_from_grouped_digits(ocr_text: str) -> str | None:
+    text = _remove_mrz_lines(ocr_text)
+    groups = re.findall(r"\d+", text)
+
+    for start in range(len(groups)):
+        combined = ""
+        for group in groups[start:]:
+            combined += group
+            if len(combined) == 12:
+                tin = normalize_tin(combined)
+                if tin:
+                    return tin
+            if len(combined) > 12:
+                break
+
+    return None
 
 
 def _apply_full_name_raw(fields: dict) -> None:
