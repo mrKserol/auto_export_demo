@@ -67,6 +67,50 @@ class YandexOCRService:
         )
         return await self._recognize_image(image_bytes, ocr_mime)
 
+    async def recognize_text_with_rotation_candidates(
+        self,
+        file_content: bytes,
+        mime_type: str | None = None,
+        *,
+        filename: str | None = None,
+        score_profile: str = "registration",
+    ) -> str:
+        resolved_mime = _resolve_mime_type(file_content, mime_type, filename)
+        extension = _extension_from_mime_or_filename(resolved_mime, filename)
+
+        if extension == "pdf":
+            return await self.recognize_text(file_content, mime_type, filename=filename)
+
+        if extension not in _IMAGE_EXTENSIONS:
+            return await self.recognize_text(file_content, mime_type, filename=filename)
+
+        candidates = await asyncio.to_thread(
+            _prepare_rotated_image_bytes_candidates,
+            file_content,
+            extension,
+            resolved_mime,
+        )
+
+        best_angle = 0
+        best_text = ""
+        best_score = float("-inf")
+        for angle, image_bytes, ocr_mime in candidates:
+            text = await self._recognize_image(image_bytes, ocr_mime)
+            score = _score_ocr_text(text, score_profile)
+            if score > best_score:
+                best_score = score
+                best_angle = angle
+                best_text = text
+
+        logger.info(
+            "OCR rotation selected for profile=%s angle=%s text_length=%s score=%s",
+            score_profile,
+            best_angle,
+            len(best_text),
+            best_score,
+        )
+        return best_text
+
     async def _recognize_pdf(self, file_content: bytes) -> list[str]:
         page_images = await asyncio.to_thread(_render_pdf_pages, file_content)
         texts: list[str] = []
@@ -118,6 +162,46 @@ class YandexOCRService:
                     return _extract_ocr_text(response_json)
 
         raise RuntimeError("Yandex OCR retries exhausted")
+
+
+REGISTRATION_OCR_KEYWORDS = {
+    "ЗАРЕГИСТРИРОВАН": 5,
+    "РЕГИСТРИРАЦИОННОГО": 3,
+    "МЕСТО ЖИТЕЛЬСТВА": 4,
+    "СНЯТ": 2,
+    "УЛ.": 2,
+    "ДОМ": 2,
+    "КВ.": 2,
+    "Г.": 1,
+}
+
+
+def _prepare_rotated_image_bytes_candidates(
+    file_content: bytes,
+    extension: str,
+    mime_type: str,
+) -> list[tuple[int, bytes, str]]:
+    image_bytes, _ = _prepare_image_bytes(file_content, extension, mime_type)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    candidates: list[tuple[int, bytes, str]] = []
+    for angle in (0, 90, 180, 270):
+        rotated = image.rotate(angle, expand=True)
+        candidates.append((angle, *_image_to_jpeg_bytes(rotated)))
+    return candidates
+
+
+def _score_ocr_text(text: str, score_profile: str) -> float:
+    if score_profile != "registration":
+        return float(len(text))
+
+    upper_text = text.upper()
+    score = sum(
+        weight for keyword, weight in REGISTRATION_OCR_KEYWORDS.items() if keyword in upper_text
+    )
+    score += min(len(text) / 100, 20)
+    if len(text) < 30:
+        score *= 0.2
+    return score
 
 
 def _resolve_mime_type(

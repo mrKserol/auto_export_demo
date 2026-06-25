@@ -181,6 +181,30 @@ OCR текст документа:
 - Если поле не найдено — null.
 """
 
+DOCUMENT_TYPE_GUARD_PROMPT = """Ты определяешь тип документа по OCR-тексту.
+OCR текст:
+---
+{ocr_text}
+---
+Верни только валидный JSON без markdown:
+{{
+  "document_type": "passport_main | passport_registration | snils | tin | mixed | unknown",
+  "confidence": 0,
+  "reason": null,
+  "detected_documents": []
+}}
+Правила:
+- passport_main: паспорт РФ, разворот с фотографией и основными данными владельца, есть ФИО, дата рождения, кем выдан, дата выдачи, код подразделения.
+- passport_registration: страница паспорта РФ с регистрацией/местом жительства, штампы "ЗАРЕГИСТРИРОВАН", "СНЯТ С РЕГИСТРАЦИОННОГО УЧЕТА", адрес регистрации.
+- snils: документ СНИЛС, есть номер формата 123-456-789 00 или текст "страховой номер индивидуального лицевого счета".
+- tin: ИНН физического лица, есть 12-значный ИНН или текст "свидетельство о постановке на учет".
+- mixed: если в OCR-тексте признаки нескольких документов одновременно.
+- unknown: если тип определить нельзя.
+- Не придумывай данные.
+"""
+
+DOCUMENT_TYPE_GUARD_MIN_CONFIDENCE = 0.55
+
 
 @dataclass(frozen=True)
 class CustomerDocumentRecognitionService:
@@ -200,6 +224,10 @@ class CustomerDocumentRecognitionService:
             mime_type,
             filename=filename,
         )
+        guard = await self._detect_document_type_from_ocr(ocr_text)
+        if not _is_document_type_allowed(guard, "passport_main"):
+            return _build_document_type_mismatch("passport_main", guard)
+
         gpt_json = await self._run_gpt("passport_main", PASSPORT_MAIN_PROMPT, ocr_text)
         return _postprocess_passport_main(gpt_json, ocr_text)
 
@@ -211,12 +239,16 @@ class CustomerDocumentRecognitionService:
         *,
         filename: str | None = None,
     ) -> dict:
-        ocr_text = await self._run_ocr(
+        ocr_text = await self._run_ocr_with_rotation(
             "passport_registration",
             file_content,
             mime_type,
             filename=filename,
         )
+        guard = await self._detect_document_type_from_ocr(ocr_text)
+        if not _is_document_type_allowed(guard, "passport_registration"):
+            return _build_document_type_mismatch("passport_registration", guard)
+
         gpt_json = await self._run_gpt(
             "passport_registration",
             PASSPORT_REGISTRATION_PROMPT,
@@ -235,6 +267,10 @@ class CustomerDocumentRecognitionService:
         filename: str | None = None,
     ) -> dict:
         ocr_text = await self._run_ocr("snils", file_content, mime_type, filename=filename)
+        guard = await self._detect_document_type_from_ocr(ocr_text)
+        if not _is_document_type_allowed(guard, "snils"):
+            return _build_document_type_mismatch("snils", guard)
+
         gpt_json = await self._run_gpt("snils", SNILS_PROMPT, ocr_text)
         return _postprocess_snils(gpt_json, ocr_text)
 
@@ -246,8 +282,104 @@ class CustomerDocumentRecognitionService:
         filename: str | None = None,
     ) -> dict:
         ocr_text = await self._run_ocr("tin", file_content, mime_type, filename=filename)
+        guard = await self._detect_document_type_from_ocr(ocr_text)
+        if not _is_document_type_allowed(guard, "tin"):
+            return _build_document_type_mismatch("tin", guard)
+
         gpt_json = await self._run_gpt("tin", TIN_PROMPT, ocr_text)
         return _postprocess_tin(gpt_json, ocr_text)
+
+    async def detect_document_type(
+        self,
+        file_content: bytes,
+        mime_type: str | None,
+        *,
+        filename: str | None = None,
+        ocr_text: str | None = None,
+        use_registration_rotation: bool = False,
+    ) -> dict:
+        if ocr_text is None:
+            if use_registration_rotation:
+                ocr_text = await self._run_ocr_with_rotation(
+                    "document_type_guard",
+                    file_content,
+                    mime_type,
+                    filename=filename,
+                )
+            else:
+                ocr_text = await self._run_ocr(
+                    "document_type_guard",
+                    file_content,
+                    mime_type,
+                    filename=filename,
+                )
+        return await self._detect_document_type_from_ocr(ocr_text)
+
+    async def _detect_document_type_from_ocr(self, ocr_text: str) -> dict:
+        gpt_json = await self._run_gpt(
+            "document_type_guard",
+            DOCUMENT_TYPE_GUARD_PROMPT,
+            ocr_text,
+        )
+        document_type = _clean_text(gpt_json.get("document_type")) or "unknown"
+        confidence_raw = gpt_json.get("confidence")
+        try:
+            confidence = float(confidence_raw) if confidence_raw is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        if confidence < DOCUMENT_TYPE_GUARD_MIN_CONFIDENCE:
+            document_type = "unknown"
+
+        detected_documents = gpt_json.get("detected_documents")
+        if not isinstance(detected_documents, list):
+            detected_documents = []
+
+        return {
+            "document_type": document_type,
+            "confidence": confidence,
+            "reason": _clean_text(gpt_json.get("reason")),
+            "detected_documents": detected_documents,
+        }
+
+    async def _run_ocr_with_rotation(
+        self,
+        document_type: str,
+        file_content: bytes,
+        mime_type: str | None,
+        *,
+        filename: str | None = None,
+    ) -> str:
+        try:
+            ocr_text = await self.ocr_service.recognize_text_with_rotation_candidates(
+                file_content,
+                mime_type,
+                filename=filename,
+                score_profile="registration",
+            )
+        except AttributeError:
+            ocr_text = await self._run_ocr(
+                document_type,
+                file_content,
+                mime_type,
+                filename=filename,
+            )
+        except Exception:
+            logger.exception("OCR with rotation failed for document_type=%s", document_type)
+            raise
+
+        if not ocr_text:
+            logger.warning(
+                "OCR with rotation returned empty text for document_type=%s",
+                document_type,
+            )
+        else:
+            logger.info(
+                "OCR with rotation completed for document_type=%s, text_length=%s",
+                document_type,
+                len(ocr_text),
+            )
+        return ocr_text
 
     async def _run_ocr(
         self,
@@ -291,6 +423,22 @@ class CustomerDocumentRecognitionService:
         else:
             logger.info("GPT completed for document_type=%s", document_type)
         return parsed
+
+
+def _is_document_type_allowed(guard: dict, expected_document_type: str) -> bool:
+    document_type = guard.get("document_type")
+    if document_type in {"mixed", "unknown"}:
+        return False
+    return document_type == expected_document_type
+
+
+def _build_document_type_mismatch(expected_document_type: str, guard: dict) -> dict:
+    return {
+        "document_type_mismatch": True,
+        "expected_document_type": expected_document_type,
+        "detected_document_type": guard.get("document_type"),
+        "document_type_reason": guard.get("reason"),
+    }
 
 
 def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:

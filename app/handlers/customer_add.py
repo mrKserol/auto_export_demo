@@ -22,8 +22,8 @@ from app.services.customer_document_recognition_service import (
 from app.services.customer_extraction_service import format_fio_normalized, person_names_match
 from app.services.file_service import (
     build_stored_filename,
+    get_file_extension,
     get_original_filename,
-    is_supported_file,
 )
 from app.services.validation_service import (
     normalize_phone,
@@ -40,6 +40,7 @@ router = Router(name="customer_add")
 logger = logging.getLogger(__name__)
 
 PROCESSING_FILE_MESSAGE = "Подождите, обрабатываю файл…"
+CUSTOMER_UPLOAD_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "webp", "heic", "heif"}
 
 
 @router.message(Command("add_customer"))
@@ -48,7 +49,11 @@ async def handle_add_customer(message: Message, state: FSMContext) -> None:
     await state.set_state(CustomerAddStates.waiting_passport_main)
     await state.update_data(customer_fields={}, uploaded_files=[])
     await message.answer(
-        "Загрузите файл паспорта со страницами 2 и 3 (разворот с фотографией)."
+        "Добавление клиента проходит в 4 шага.\n"
+        "Пожалуйста, отправляйте документы строго по одному файлу.\n\n"
+        "Шаг 1 из 4.\n"
+        "Отправьте ОДИН файл: разворот паспорта с фотографией и данными владельца.\n"
+        "Не отправляйте сейчас регистрацию, СНИЛС или ИНН."
     )
 
 
@@ -60,6 +65,12 @@ async def handle_passport_main_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    if await _reject_media_group_if_needed(
+        message,
+        "разворот паспорта с фотографией и данными владельца",
+    ):
+        return
+
     await message.answer(PROCESSING_FILE_MESSAGE)
 
     response_payload = await _upload_customer_file(message, bot, yandex_disk_client)
@@ -80,6 +91,15 @@ async def handle_passport_main_upload(
         )
         return
 
+    if fields.get("document_type_mismatch"):
+        await message.answer(
+            _format_document_type_mismatch_message(
+                "passport_main",
+                fields.get("detected_document_type"),
+            )
+        )
+        return
+
     passport = fields.get("passport")
     if not passport:
         await message.answer(
@@ -91,13 +111,15 @@ async def handle_passport_main_upload(
     await state.update_data(customer_fields=fields)
     await state.set_state(CustomerAddStates.waiting_registration)
     await message.answer(
-        "Паспорт распознан.\n\n"
+        "✅ Паспорт распознан.\n\n"
         f"Паспорт: {fields.get('passport') or '—'}\n"
         f"ФИО: {format_customer_fio(fields)}\n"
         f"Кем выдан: {fields.get('by_whom_issued') or '—'}\n"
         f"Дата выдачи: {fields.get('date_issue') or '—'}\n"
         f"Код подразделения: {fields.get('department_code') or '—'}\n\n"
-        f"Загрузите файл паспорта со страницей регистрации паспорта {passport}."
+        "Шаг 2 из 4.\n"
+        "Отправьте ОДИН файл: страницу паспорта с регистрацией.\n"
+        "Не отправляйте сейчас СНИЛС или ИНН."
     )
 
 
@@ -109,6 +131,12 @@ async def handle_registration_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    if await _reject_media_group_if_needed(
+        message,
+        "страница паспорта с регистрацией",
+    ):
+        return
+
     await message.answer(PROCESSING_FILE_MESSAGE)
 
     data = await state.get_data()
@@ -134,6 +162,16 @@ async def handle_registration_upload(
         logger.exception("Registration recognition failed")
         await message.answer(
             "Не удалось обработать файл регистрации.",
+            reply_markup=_manual_registration_keyboard(),
+        )
+        return
+
+    if reg_fields.get("document_type_mismatch"):
+        await message.answer(
+            _format_document_type_mismatch_message(
+                "passport_registration",
+                reg_fields.get("detected_document_type"),
+            ),
             reply_markup=_manual_registration_keyboard(),
         )
         return
@@ -193,6 +231,9 @@ async def handle_snils_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    if await _reject_media_group_if_needed(message, "СНИЛС"):
+        return
+
     await message.answer(PROCESSING_FILE_MESSAGE)
 
     data = await state.get_data()
@@ -211,6 +252,16 @@ async def handle_snils_upload(
         logger.exception("SNILS recognition failed")
         await message.answer(
             "Не удалось обработать файл СНИЛС.",
+            reply_markup=_manual_snils_keyboard(),
+        )
+        return
+
+    if snils_fields.get("document_type_mismatch"):
+        await message.answer(
+            _format_document_type_mismatch_message(
+                "snils",
+                snils_fields.get("detected_document_type"),
+            ),
             reply_markup=_manual_snils_keyboard(),
         )
         return
@@ -274,6 +325,9 @@ async def handle_tin_upload(
     yandex_disk_client: YandexDiskClient,
     customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
+    if await _reject_media_group_if_needed(message, "ИНН"):
+        return
+
     await message.answer(PROCESSING_FILE_MESSAGE)
 
     data = await state.get_data()
@@ -292,6 +346,16 @@ async def handle_tin_upload(
         logger.exception("TIN recognition failed")
         await message.answer(
             "Не удалось обработать файл ИНН.",
+            reply_markup=_manual_tin_keyboard(),
+        )
+        return
+
+    if tin_fields.get("document_type_mismatch"):
+        await message.answer(
+            _format_document_type_mismatch_message(
+                "tin",
+                tin_fields.get("detected_document_type"),
+            ),
             reply_markup=_manual_tin_keyboard(),
         )
         return
@@ -442,12 +506,8 @@ async def _go_to_snils_step(
     await message.answer(
         "Адрес регистрации распознан:\n\n"
         f"{customer_fields.get('registration_address')}\n\n"
-        f"Загрузите файл СНИЛС для клиента:\n"
-        f"{format_customer_fio(customer_fields)}\n\n"
-        f"Паспортные данные:\n"
-        f"{customer_fields.get('passport')}, выдан {customer_fields.get('by_whom_issued') or '—'}\n"
-        f"Дата выдачи: {customer_fields.get('date_issue') or '—'}, "
-        f"код подразделения: {customer_fields.get('department_code') or '—'}"
+        "Шаг 3 из 4.\n"
+        "Отправьте ОДИН файл: СНИЛС."
     )
 
 
@@ -459,7 +519,8 @@ async def _go_to_tin_step(
     await state.set_state(CustomerAddStates.waiting_tin)
     await message.answer(
         f"СНИЛС распознан: {customer_fields.get('ipain')}\n\n"
-        f"Загрузите файл ИНН для клиента {format_customer_fio(customer_fields)}."
+        "Шаг 4 из 4.\n"
+        "Отправьте ОДИН файл: ИНН."
     )
 
 
@@ -480,10 +541,10 @@ async def _upload_customer_file(
     else:
         return None
 
-    if not is_supported_file(original_filename):
+    if not _is_customer_upload_supported(original_filename):
         await message.reply(
             "Формат файла не поддерживается. Поддерживаются: "
-            "pdf, jpg, jpeg, png, webp, heic, docx, xlsx."
+            "pdf, jpg, jpeg, png, webp, heic, heif."
         )
         return None
 
@@ -522,6 +583,74 @@ async def _upload_customer_file(
         "mime_type": mime_type,
         "content": file_content,
     }
+
+
+async def _reject_media_group_if_needed(message: Message, expected_document_text: str) -> bool:
+    if message.media_group_id:
+        await message.answer(
+            "Пожалуйста, отправляйте документы по одному файлу.\n\n"
+            f"Сейчас ожидается: {expected_document_text}"
+        )
+        return True
+    return False
+
+
+def _is_customer_upload_supported(filename: str) -> bool:
+    return get_file_extension(filename) in CUSTOMER_UPLOAD_EXTENSIONS
+
+
+def _format_document_type_mismatch_message(
+    expected_document_type: str,
+    detected_type: str | None,
+) -> str:
+    labels = {
+        "passport_main": "разворот паспорта с фотографией и данными владельца",
+        "passport_registration": "страница паспорта с регистрацией",
+        "snils": "СНИЛС",
+        "tin": "ИНН",
+        "mixed": "несколько документов одновременно",
+        "unknown": "неизвестный документ",
+    }
+
+    if expected_document_type == "passport_main" and detected_type == "tin":
+        return (
+            "Похоже, вы отправили ИНН.\n"
+            "Сейчас нужен: разворот паспорта с фотографией и данными владельца."
+        )
+    if expected_document_type == "passport_main" and detected_type == "snils":
+        return (
+            "Похоже, вы отправили СНИЛС.\n"
+            "Сейчас нужен: разворот паспорта с фотографией и данными владельца."
+        )
+    if expected_document_type == "passport_main":
+        return (
+            "Похоже, это не разворот паспорта с фотографией и данными владельца.\n"
+            "Сейчас нужен: один файл с разворотом паспорта с фотографией.\n"
+            "Пожалуйста, отправьте корректный файл."
+        )
+    if expected_document_type == "passport_registration":
+        return (
+            "Похоже, это не страница паспорта с регистрацией.\n"
+            "Сейчас нужен: один файл со страницей регистрации паспорта."
+        )
+    if expected_document_type == "snils":
+        return (
+            "Похоже, это не СНИЛС.\n"
+            "Сейчас нужен: один файл СНИЛС."
+        )
+    if expected_document_type == "tin":
+        return (
+            "Похоже, это не ИНН.\n"
+            "Сейчас нужен: один файл ИНН."
+        )
+
+    expected_label = labels.get(expected_document_type, expected_document_type)
+    detected_label = labels.get(detected_type or "", detected_type or "неизвестный документ")
+    return (
+        f"Похоже, это не {expected_label}.\n"
+        f"Сейчас нужен: один файл — {expected_label}.\n"
+        f"Обнаружено: {detected_label}."
+    )
 
 
 def _manual_registration_keyboard() -> InlineKeyboardMarkup:
