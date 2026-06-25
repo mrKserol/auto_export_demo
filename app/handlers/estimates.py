@@ -8,13 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
-from app.services.contract_generation_service import (
-    CustomerNotFoundError,
-    CustomerSpecificationMissingError,
-    SpecificationNotFoundError,
-    TemplateNotFoundError,
-    generate_customer_contract_docx,
-)
+from app.services.customer_card_service import build_show_estimate_keyboard
 from app.services.estimate_excel_generation_service import (
     EstimateExcelTemplateNotFoundError,
     generate_estimate_excel,
@@ -46,24 +40,12 @@ INSURANCE_SHIPMENT_PROMPT = "Введите стоимость страхова�
 CUSTOM_CLEARING_PROMPT = "Введите стоимость таможенной очистки"
 CONTRACTOR_COMISSION_PROMPT = "Введите комиссию исполнителя"
 SESSION_EXPIRED_REPLY = "Сессия устарела. Начните создание сметы заново."
-CONTRACT_GENERATION_FAILED_REPLY = (
-    "Смета создана, но договор не удалось сформировать. "
-    "Проверьте шаблон договора или данные клиента."
+ESTIMATE_ALREADY_EXISTS_REPLY = (
+    "Смета для клиента уже создана. Нажмите [Показать смету] или сформируйте договор."
 )
-
-
-@router.callback_query(F.data.startswith("estimate_contract:create:"))
-async def handle_estimate_contract_create_start(
-    callback: CallbackQuery,
-    state: FSMContext,
-    database: Database,
-) -> None:
-    await _start_estimate_flow(
-        callback,
-        state,
-        database,
-        generate_contract_after_estimate=True,
-    )
+ESTIMATE_SAVED_REPLY = (
+    "Смета сохранена. Теперь можно сформировать договор или открыть смету из карточки клиента."
+)
 
 
 @router.callback_query(F.data.startswith("estimate:create:"))
@@ -72,26 +54,11 @@ async def handle_estimate_create_start(
     state: FSMContext,
     database: Database,
 ) -> None:
-    await _start_estimate_flow(
-        callback,
-        state,
-        database,
-        generate_contract_after_estimate=False,
-    )
-
-
-async def _start_estimate_flow(
-    callback: CallbackQuery,
-    state: FSMContext,
-    database: Database,
-    *,
-    generate_contract_after_estimate: bool,
-) -> None:
     if callback.message is None:
         return
 
     parts = callback.data.split(":")
-    if len(parts) != 3 or parts[2] == "":
+    if len(parts) != 3 or parts[0] != "estimate" or parts[1] != "create":
         await callback.answer("Некорректная команда сметы", show_alert=True)
         return
 
@@ -104,6 +71,15 @@ async def _start_estimate_flow(
     customer = await database.get_customer_by_id(customer_id)
     if not customer:
         await callback.message.answer("Клиент не найден.")
+        await callback.answer()
+        return
+
+    existing_estimate = await database.get_estimate_by_customer_id(customer_id)
+    if existing_estimate:
+        await callback.message.answer(
+            ESTIMATE_ALREADY_EXISTS_REPLY,
+            reply_markup=build_show_estimate_keyboard(customer_id),
+        )
         await callback.answer()
         return
 
@@ -134,7 +110,6 @@ async def _start_estimate_flow(
     await state.update_data(
         customer_id=customer_id,
         specification_id=int(specification_id),
-        generate_contract_after_estimate=generate_contract_after_estimate,
     )
     await state.set_state(EstimateStates.waiting_engine_power)
     await callback.message.answer("Введите мощность автомобиля в л.с.")
@@ -227,10 +202,18 @@ async def handle_estimate_contractor_comission(
     data = await state.get_data()
     customer_id = data.get("customer_id")
     specification_id = data.get("specification_id")
-    generate_contract_after_estimate = bool(data.get("generate_contract_after_estimate"))
     if not customer_id or not specification_id:
         await state.clear()
         await message.answer(SESSION_EXPIRED_REPLY)
+        return
+
+    existing_estimate = await database.get_estimate_by_customer_id(int(customer_id))
+    if existing_estimate:
+        await state.clear()
+        await message.answer(
+            ESTIMATE_ALREADY_EXISTS_REPLY,
+            reply_markup=build_show_estimate_keyboard(int(customer_id)),
+        )
         return
 
     parsed_values = _parse_fsm_estimate_values(data)
@@ -276,66 +259,63 @@ async def handle_estimate_contractor_comission(
         return
 
     await state.clear()
-
-    if generate_contract_after_estimate:
-        await _send_estimate_with_contract(
-            message,
-            customer_id=int(customer_id),
-            database=database,
-            estimate=estimate,
-            specification=specification,
-        )
-        return
-
     await message.answer(format_estimate_summary(estimate, specification))
+    await message.answer(ESTIMATE_SAVED_REPLY)
 
 
-async def _send_estimate_with_contract(
-    message: Message,
-    *,
-    customer_id: int,
-    database: Database,
-    estimate: dict,
-    specification: dict,
-) -> None:
-    contract_file_path: str | None = None
-    try:
-        contract_file_path = await generate_customer_contract_docx(
-            customer_id,
-            database,
-            estimate=estimate,
-        )
-    except (
-        CustomerNotFoundError,
-        CustomerSpecificationMissingError,
-        SpecificationNotFoundError,
-        TemplateNotFoundError,
-    ) as error:
-        logger.exception(
-            "Contract generation failed after estimate for customer_id=%s: %s",
-            customer_id,
-            error,
-        )
-    except Exception:
-        logger.exception(
-            "Contract generation failed after estimate for customer_id=%s",
-            customer_id,
-        )
-
-    summary = format_estimate_summary(estimate, specification)
-    if contract_file_path:
-        summary = summary.replace("Смета создана.", "Смета и договор сформированы.", 1)
-
-    await message.answer(summary)
-
-    if contract_file_path:
-        await message.answer_document(
-            FSInputFile(contract_file_path),
-            caption="Готово. Договор сформирован.",
-        )
+@router.callback_query(F.data.startswith("estimate:show:"))
+async def handle_estimate_show(callback: CallbackQuery, database: Database) -> None:
+    if callback.message is None:
         return
 
-    await message.answer(CONTRACT_GENERATION_FAILED_REPLY)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректная команда", show_alert=True)
+        return
+
+    try:
+        customer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный ID клиента", show_alert=True)
+        return
+
+    estimate = await database.get_estimate_by_customer_id(customer_id)
+    if not estimate:
+        await callback.message.answer("Смета для клиента ещё не создана.")
+        await callback.answer()
+        return
+
+    specification = await _load_specification_for_estimate(database, estimate)
+    sent = await _send_estimate_excel(callback.message, estimate, specification)
+    await callback.answer("Не удалось отправить смету." if not sent else None)
+
+
+async def _load_specification_for_estimate(database: Database, estimate: dict) -> dict | None:
+    specification_id = estimate.get("specification_id")
+    if not specification_id:
+        return None
+    return await database.get_specification_by_id(int(specification_id))
+
+
+async def _send_estimate_excel(
+    message: Message,
+    estimate: dict,
+    specification: dict | None,
+    *,
+    caption: str = "Смета Excel.",
+) -> bool:
+    try:
+        file_path = generate_estimate_excel(estimate, specification)
+    except EstimateExcelTemplateNotFoundError:
+        await message.answer("Шаблон сметы не найден: templates/smeta_template.xlsx")
+        return False
+    except Exception:
+        logger.exception("Failed to generate estimate Excel for estimate_id=%s", estimate.get("id"))
+        await message.answer("Не удалось сформировать Excel-смету. Проверьте шаблон.")
+        return False
+
+    await message.answer_document(FSInputFile(file_path), caption=caption)
+    return True
 
 
 def _parse_fsm_estimate_values(data: dict) -> tuple | None:
@@ -364,51 +344,3 @@ def _parse_fsm_estimate_values(data: dict) -> tuple | None:
         insurance_shipment,
         custom_clearing,
     )
-
-
-@router.callback_query(F.data.startswith("estimate:excel:"))
-async def handle_estimate_excel(callback: CallbackQuery, database: Database) -> None:
-    if callback.message is None:
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("Некорректная команда", show_alert=True)
-        return
-
-    try:
-        customer_id = int(parts[2])
-    except ValueError:
-        await callback.answer("Некорректный ID клиента", show_alert=True)
-        return
-
-    estimate = await database.get_estimate_by_customer_id(customer_id)
-    if not estimate:
-        await callback.message.answer("Смета для клиента ещё не создана.")
-        await callback.answer()
-        return
-
-    specification = None
-    specification_id = estimate.get("specification_id")
-    if specification_id:
-        specification = await database.get_specification_by_id(int(specification_id))
-
-    try:
-        file_path = generate_estimate_excel(estimate, specification)
-    except EstimateExcelTemplateNotFoundError:
-        await callback.message.answer("Шаблон сметы не найден: templates/smeta_template.xlsx")
-        await callback.answer()
-        return
-    except Exception:
-        logger.exception("Failed to generate estimate Excel for customer_id=%s", customer_id)
-        await callback.message.answer(
-            "Не удалось сформировать Excel-смету. Проверьте шаблон."
-        )
-        await callback.answer()
-        return
-
-    await callback.message.answer_document(
-        FSInputFile(file_path),
-        caption="Смета Excel сформирована.",
-    )
-    await callback.answer()

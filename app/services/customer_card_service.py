@@ -6,11 +6,11 @@ from app.database import Database
 from app.services.specification_edit_service import format_specification_text
 
 
-async def build_customer_card_keyboard(
+def build_customer_card_keyboard(
     customer: dict,
-    database: Database,
     *,
     is_admin: bool,
+    has_estimate: bool = False,
 ) -> InlineKeyboardMarkup:
     customer_id = int(customer["id"])
     rows: list[list[InlineKeyboardButton]] = []
@@ -19,8 +19,8 @@ async def build_customer_card_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Сформировать договор и смету",
-                    callback_data=f"estimate_contract:create:{customer_id}",
+                    text="Сформировать договор",
+                    callback_data=f"customer_generate_contract:{customer_id}",
                 ),
                 InlineKeyboardButton(
                     text="Изменить спецификацию",
@@ -28,13 +28,21 @@ async def build_customer_card_keyboard(
                 ),
             ]
         )
-        estimate = await database.get_estimate_by_customer_id(customer_id)
-        if estimate:
+        if has_estimate:
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text="Сформировать смету Excel",
-                        callback_data=f"estimate:excel:{customer_id}",
+                        text="Показать смету",
+                        callback_data=f"estimate:show:{customer_id}",
+                    )
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Создать смету",
+                        callback_data=f"estimate:create:{customer_id}",
                     )
                 ]
             )
@@ -63,6 +71,32 @@ async def build_customer_card_keyboard(
         )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_create_estimate_keyboard(customer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Создать смету",
+                    callback_data=f"estimate:create:{customer_id}",
+                )
+            ]
+        ]
+    )
+
+
+def build_show_estimate_keyboard(customer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Показать смету",
+                    callback_data=f"estimate:show:{customer_id}",
+                )
+            ]
+        ]
+    )
 
 
 def format_customer_fio(customer: dict) -> str:

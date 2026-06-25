@@ -73,10 +73,13 @@ async def handle_search_passport(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
+    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
     await message.answer(
         await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
-            customer, database, is_admin=is_admin
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=is_admin,
+            has_estimate=bool(estimate),
         ),
     )
 
@@ -167,14 +170,15 @@ async def handle_customer_edit_back(
 
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer_id)
+    estimate = await database.get_estimate_by_customer_id(customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
+        reply_markup=build_customer_card_keyboard(
             customer,
-            database,
             is_admin=await is_admin_for_customer_management(
                 bot, callback.message.chat.id, callback.from_user.id
             ),
+            has_estimate=bool(estimate),
         ),
     )
     await callback.answer()
@@ -232,10 +236,13 @@ async def handle_customer_new_value(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
+    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
     await message.answer(
         await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
-            customer, database, is_admin=is_admin
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=is_admin,
+            has_estimate=bool(estimate),
         ),
     )
     await state.set_state(CustomerEditStates.choosing_action)

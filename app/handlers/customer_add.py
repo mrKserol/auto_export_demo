@@ -397,11 +397,14 @@ async def handle_add_customer_email(
         is_admin = await is_admin_for_customer_management(
             bot, message.chat.id, message.from_user.id if message.from_user else 0
         )
+        estimate = await database.get_estimate_by_customer_id(int(existing["id"]))
         await message.answer(
             "Клиент с таким паспортом уже существует.\n\n"
             + await build_customer_card(existing, database),
-            reply_markup=await build_customer_card_keyboard(
-                existing, database, is_admin=is_admin
+            reply_markup=build_customer_card_keyboard(
+                existing,
+                is_admin=is_admin,
+                has_estimate=bool(estimate),
             ),
         )
         return
@@ -418,10 +421,13 @@ async def handle_add_customer_email(
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )
+    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
     await message.answer(
         "✅ Клиент добавлен\n\n" + await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
-            customer, database, is_admin=is_admin
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=is_admin,
+            has_estimate=bool(estimate),
         ),
     )
 

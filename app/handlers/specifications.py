@@ -19,8 +19,13 @@ from app.services.contract_generation_service import (
     generate_customer_contract_docx,
 )
 from app.services.customer_card_service import (
+    build_create_estimate_keyboard,
     build_customer_card,
     build_customer_card_keyboard,
+)
+from app.services.estimate_excel_generation_service import (
+    EstimateExcelTemplateNotFoundError,
+    generate_estimate_excel,
 )
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
@@ -36,6 +41,11 @@ from app.states.specification_states import SpecificationAddStates, Specificatio
 router = Router(name="specifications")
 logger = logging.getLogger(__name__)
 
+ESTIMATE_REQUIRED_FOR_CONTRACT_REPLY = (
+    "Сначала создайте смету для клиента. Нажмите [Создать смету], "
+    "введите все данные сметы, затем снова сформируйте договор."
+)
+
 
 @router.callback_query(F.data.startswith("customer_generate_contract:"))
 async def handle_generate_contract(
@@ -49,30 +59,65 @@ async def handle_generate_contract(
     await callback.answer()
     await callback.message.answer("Формирую договор...")
 
+    estimate = await database.get_estimate_by_customer_id(customer_id)
+    if not estimate:
+        await callback.message.answer(
+            ESTIMATE_REQUIRED_FOR_CONTRACT_REPLY,
+            reply_markup=build_create_estimate_keyboard(customer_id),
+        )
+        return
+
+    specification = None
+    specification_id = estimate.get("specification_id")
+    if specification_id:
+        specification = await database.get_specification_by_id(int(specification_id))
+
     try:
-        estimate = await database.get_estimate_by_customer_id(customer_id)
-        file_path = await generate_customer_contract_docx(
+        word_path = await generate_customer_contract_docx(
             customer_id,
             database,
             estimate=estimate,
         )
-        await callback.message.answer_document(
-            FSInputFile(file_path),
-            caption="Готово. Договор сформирован.",
-        )
     except CustomerNotFoundError:
         await callback.message.answer("Клиент не найден.")
+        return
     except CustomerSpecificationMissingError:
         await callback.message.answer(
             "У клиента нет спецификации авто. Сначала добавьте спецификацию."
         )
+        return
     except SpecificationNotFoundError:
         await callback.message.answer("Спецификация клиента не найдена.")
+        return
     except TemplateNotFoundError as error:
         await callback.message.answer(str(error))
+        return
     except Exception as error:
         logger.exception("Contract generation failed for customer_id=%s", customer_id)
         await callback.message.answer(f"Не удалось сформировать договор: {error}")
+        return
+
+    await callback.message.answer_document(
+        FSInputFile(word_path),
+        caption="Договор сформирован.",
+    )
+
+    try:
+        excel_path = generate_estimate_excel(estimate, specification)
+    except EstimateExcelTemplateNotFoundError:
+        await callback.message.answer("Шаблон сметы не найден: templates/smeta_template.xlsx")
+        return
+    except Exception:
+        logger.exception("Estimate Excel generation failed for customer_id=%s", customer_id)
+        await callback.message.answer(
+            "Договор сформирован, но Excel-смету не удалось сформировать. Проверьте шаблон."
+        )
+        return
+
+    await callback.message.answer_document(
+        FSInputFile(excel_path),
+        caption="Смета к договору.",
+    )
 
 
 @router.callback_query(F.data.startswith("customer_add_spec:"))
@@ -211,10 +256,13 @@ async def handle_spec_edit_back(
     )
     await state.set_state(CustomerEditStates.choosing_action)
     await state.update_data(customer_id=customer_id)
+    estimate = await database.get_estimate_by_customer_id(customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
-            customer, database, is_admin=is_admin
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=is_admin,
+            has_estimate=bool(estimate),
         ),
     )
     await callback.answer()
@@ -499,10 +547,13 @@ async def _finalize_specification(
             bot, message.chat.id, message.from_user.id
         )
 
+    estimate = await database.get_estimate_by_customer_id(int(customer["id"]))
     await message.answer(
         "✅ Спецификация добавлена\n\n" + await build_customer_card(customer, database),
-        reply_markup=await build_customer_card_keyboard(
-            customer, database, is_admin=is_admin
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=is_admin,
+            has_estimate=bool(estimate),
         ),
     )
 
