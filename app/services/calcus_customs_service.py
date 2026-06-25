@@ -135,6 +135,7 @@ def build_calcus_customs_payload(
     calculation_year: int | None = None,
     owner: int = 1,
     power_unit: int | None = None,
+    price_abroad: float | None = None,
 ) -> dict[str, Any]:
     if calculation_year is None:
         calculation_year = datetime.now().year
@@ -144,13 +145,16 @@ def build_calcus_customs_payload(
     engine_code, engine_warnings = map_engine_type_to_calcus(specification.get("eng_type"))
     engine_capacity_cc = parse_engine_capacity_cc(specification.get("eng_capacity"))
 
-    price_text = str(specification.get("price") or "").strip().replace(",", ".")
-    if not price_text:
-        raise CalcusValidationError("Не указана стоимость автомобиля для Calcus API.")
-    try:
-        price = float(price_text)
-    except ValueError as exc:
-        raise CalcusValidationError("Некорректная стоимость автомобиля для Calcus API.") from exc
+    if price_abroad is not None:
+        price = float(price_abroad)
+    else:
+        price_text = str(specification.get("price") or "").strip().replace(",", ".")
+        if not price_text:
+            raise CalcusValidationError("Не указана стоимость автомобиля для Calcus API.")
+        try:
+            price = float(price_text)
+        except ValueError as exc:
+            raise CalcusValidationError("Некорректная стоимость автомобиля для Calcus API.") from exc
 
     if engine_power <= 0:
         raise CalcusValidationError("Мощность двигателя должна быть больше нуля.")
@@ -193,6 +197,7 @@ class CalcusCustomsService:
         calculation_year: int | None = None,
         owner: int = 1,
         power_unit: int | None = None,
+        price_abroad: float | None = None,
     ) -> CalcusCustomsResult:
         warnings: list[str] = []
         if not self._client_id:
@@ -213,6 +218,7 @@ class CalcusCustomsService:
                 calculation_year=calculation_year,
                 owner=owner,
                 power_unit=power_unit,
+                price_abroad=price_abroad,
             )
             _, currency_warnings = normalize_currency(specification.get("price_currency"))
             _, engine_warnings = map_engine_type_to_calcus(specification.get("eng_type"))
@@ -429,14 +435,25 @@ def extract_customs_fields(calcus_response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_customs_total_rub(estimate_data: dict[str, Any]) -> float:
-    total2 = estimate_data.get("customs_total2")
-    if _is_nonzero_amount(total2):
-        return float(total2)
+def get_customs_payments_rub(estimate_data: dict[str, Any]) -> float:
     total = estimate_data.get("customs_total")
-    if _is_nonzero_amount(total):
+    if total is not None:
         return float(total)
     return 0.0
+
+
+def get_car_with_customs_rub(estimate_data: dict[str, Any]) -> float:
+    total2 = estimate_data.get("customs_total2")
+    if total2 is not None and _is_nonzero_amount(total2):
+        return float(total2)
+    total = estimate_data.get("customs_total")
+    if total is not None and _is_nonzero_amount(total):
+        return float(total)
+    return 0.0
+
+
+def get_customs_total_rub(estimate_data: dict[str, Any]) -> float:
+    return get_car_with_customs_rub(estimate_data)
 
 
 def _is_nonzero_amount(value: object) -> bool:

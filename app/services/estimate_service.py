@@ -7,7 +7,7 @@ from app.database import Database
 from app.services.calcus_customs_service import (
     CalcusCustomsService,
     extract_customs_fields,
-    get_customs_total_rub,
+    get_customs_payments_rub,
 )
 
 BANK_COMMISSION_RATE = Decimal("0.025")
@@ -36,6 +36,21 @@ def parse_positive_decimal(value: str | None) -> Decimal | None:
     return number
 
 
+def parse_non_negative_decimal(value: str | None) -> Decimal | None:
+    if value is None:
+        return None
+    text = value.strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        number = Decimal(text)
+    except InvalidOperation:
+        return None
+    if number < 0:
+        return None
+    return number
+
+
 def calculate_car_age_category(year: int) -> str:
     current_year = datetime.now().year
     age = current_year - year
@@ -59,6 +74,7 @@ def calculate_estimate(
     specification: dict,
     engine_power: Decimal,
     exchange_rate: Decimal,
+    inspect_transport_price: Decimal,
     calcus_result: dict | None = None,
     calcus_error: str | None = None,
     calcus_warnings: list[str] | None = None,
@@ -67,9 +83,12 @@ def calculate_estimate(
     year = int(year_text)
     car_age_category = calculate_car_age_category(year)
 
-    price_abroad = parse_positive_decimal(specification.get("price"))
-    if price_abroad is None:
+    specification_price = parse_positive_decimal(specification.get("price"))
+    if specification_price is None:
         raise ValueError("Specification price is invalid")
+
+    inspect_transport_price = _quantize_money(inspect_transport_price)
+    price_abroad = _quantize_money(specification_price + inspect_transport_price)
 
     price_currency = (specification.get("price_currency") or DEFAULT_PRICE_CURRENCY).strip() or DEFAULT_PRICE_CURRENCY
     price_rub = _quantize_money(price_abroad * exchange_rate)
@@ -92,6 +111,7 @@ def calculate_estimate(
         "customs_raw_response": None,
         "customs_error": calcus_error,
     }
+    calcus_success = False
     if calcus_result:
         extracted = extract_customs_fields(calcus_result)
         customs_fields = {
@@ -106,23 +126,26 @@ def calculate_estimate(
             "customs_raw_response": extracted["customs_raw_response"],
             "customs_error": None,
         }
+        calcus_success = True
 
-    customs_total_rub = Decimal(str(get_customs_total_rub(customs_fields)))
-    total_rub = _quantize_money(
-        price_rub
-        + bank_commission
-        + transit_declaration_price
-        + insurance_shipment
-        + custom_clearing
-        + custom_duties
-        + contractor_comission
-        + customs_total_rub
-    )
+    if calcus_success:
+        total_rub = _quantize_money(customs_fields["customs_total2"])
+    else:
+        total_rub = _quantize_money(
+            price_rub
+            + bank_commission
+            + transit_declaration_price
+            + insurance_shipment
+            + custom_clearing
+            + custom_duties
+            + contractor_comission
+        )
 
     return {
         "engine_power": _quantize_decimal(engine_power, 2),
         "car_age_category": car_age_category,
         "price_abroad": price_abroad,
+        "inspect_transport_price": inspect_transport_price,
         "price_currency": price_currency,
         "exchange_rate": _quantize_decimal(exchange_rate, 6),
         "price_rub": price_rub,
@@ -136,6 +159,7 @@ def calculate_estimate(
         "brand": specification.get("brand") or "",
         "model": specification.get("model") or "",
         "year": year_text,
+        "specification_price": specification_price,
         "calcus_warnings": calcus_warnings or [],
         **customs_fields,
     }
@@ -149,18 +173,27 @@ async def create_estimate(
     specification: dict,
     engine_power: Decimal,
     exchange_rate: Decimal,
+    inspect_transport_price: Decimal,
     calcus_service: CalcusCustomsService | None = None,
 ) -> dict:
+    specification_price = parse_positive_decimal(specification.get("price"))
+    if specification_price is None:
+        raise ValueError("Specification price is invalid")
+
+    price_abroad = _quantize_money(specification_price + inspect_transport_price)
+
     calcus_service = calcus_service or CalcusCustomsService()
     calcus_outcome = await calcus_service.calculate_customs(
         specification,
         float(engine_power),
+        price_abroad=float(price_abroad),
     )
 
     calculated = calculate_estimate(
         specification=specification,
         engine_power=engine_power,
         exchange_rate=exchange_rate,
+        inspect_transport_price=inspect_transport_price,
         calcus_result=calcus_outcome.response,
         calcus_error=calcus_outcome.error,
         calcus_warnings=calcus_outcome.warnings,
@@ -188,14 +221,21 @@ def format_estimate_summary(estimate: dict, specification: dict | None = None) -
     brand = (specification or estimate).get("brand") or estimate.get("brand") or "—"
     model = (specification or estimate).get("model") or estimate.get("model") or "—"
     year = (specification or estimate).get("year") or estimate.get("year") or "—"
-    customs_total_rub = get_customs_total_rub(estimate)
+    price_currency = estimate.get("price_currency") or DEFAULT_PRICE_CURRENCY
+    specification_price = (specification or {}).get("price")
+    if specification_price is None:
+        specification_price = estimate.get("specification_price")
+    inspect_transport_price = estimate.get("inspect_transport_price")
+    if inspect_transport_price is None:
+        inspect_transport_price = Decimal("0")
+    customs_payments_rub = get_customs_payments_rub(estimate)
 
     lines = [
         "Смета создана.\n",
         f"Автомобиль: {brand} {model} {year}",
         f"Возраст: {estimate.get('car_age_category') or '—'}",
-        f"Стоимость авто: {_format_amount(estimate.get('price_abroad'))} "
-        f"{estimate.get('price_currency') or DEFAULT_PRICE_CURRENCY}",
+        f"Стоимость авто: {_format_amount(specification_price)} {price_currency}",
+        f"Осмотр и транспортировка в КНР: {_format_amount(inspect_transport_price)} {price_currency}",
         f"Курс: {_format_amount(estimate.get('exchange_rate'))}",
         f"Стоимость авто в RUB: {_format_amount(estimate.get('price_rub'))}",
         f"Банковская комиссия 2,5%: {_format_amount(estimate.get('bank_commission'))}",
@@ -210,15 +250,13 @@ def format_estimate_summary(estimate: dict, specification: dict | None = None) -
         lines.extend(
             [
                 "",
-                "Таможенные платежи:",
+                "Стоимость автомобиля с растаможкой:",
                 f"- сбор: {_format_rub(estimate.get('customs_sbor'))}",
                 f"- пошлина: {_format_rub(estimate.get('customs_tax'))}",
                 f"- утильсбор: {_format_rub(estimate.get('customs_util'))}",
                 f"- НДС: {_format_rub(estimate.get('customs_nds'))}",
                 f"- акциз: {_format_rub(estimate.get('customs_excise'))}",
-                f"- итого Calcus total: {_format_rub(estimate.get('customs_total'))}",
-                f"- итого Calcus total2: {_format_rub(estimate.get('customs_total2'))}",
-                f"Таможенные платежи: {_format_rub(customs_total_rub)}",
+                f"Таможенные платежи: {_format_rub(customs_payments_rub)}",
             ]
         )
 

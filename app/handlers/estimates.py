@@ -10,6 +10,7 @@ from app.services.estimate_service import (
     create_estimate,
     format_estimate_summary,
     get_missing_specification_fields_for_estimate,
+    parse_non_negative_decimal,
     parse_positive_decimal,
 )
 from app.states.estimate_states import EstimateStates
@@ -18,9 +19,11 @@ from app.states.estimate_states import EstimateStates
 router = Router(name="estimates")
 
 INVALID_NUMBER_REPLY = "Введите число, например 110"
+INVALID_INSPECT_TRANSPORT_REPLY = "Введите положительное число или 0."
 EXCHANGE_RATE_PROMPT = (
     "Введите курс валюты к рублю. Например: 12.1 для CNY или 0.57 для JPY."
 )
+INSPECT_TRANSPORT_PROMPT = "Введите стоимость осмотра и транспортировки в КНР"
 
 
 @router.callback_query(F.data.startswith("estimate:create:"))
@@ -95,27 +98,41 @@ async def handle_estimate_engine_power(message: Message, state: FSMContext) -> N
 
 
 @router.message(StateFilter(EstimateStates.waiting_exchange_rate), F.text)
-async def handle_estimate_exchange_rate(
+async def handle_estimate_exchange_rate(message: Message, state: FSMContext) -> None:
+    exchange_rate = parse_positive_decimal(message.text)
+    if exchange_rate is None:
+        await message.answer(INVALID_NUMBER_REPLY)
+        return
+
+    await state.update_data(exchange_rate=str(exchange_rate))
+    await state.set_state(EstimateStates.waiting_inspect_transport_price)
+    await message.answer(INSPECT_TRANSPORT_PROMPT)
+
+
+@router.message(StateFilter(EstimateStates.waiting_inspect_transport_price), F.text)
+async def handle_estimate_inspect_transport_price(
     message: Message,
     state: FSMContext,
     database: Database,
 ) -> None:
-    exchange_rate = parse_positive_decimal(message.text)
-    if exchange_rate is None:
-        await message.answer(INVALID_NUMBER_REPLY)
+    inspect_transport_price = parse_non_negative_decimal(message.text)
+    if inspect_transport_price is None:
+        await message.answer(INVALID_INSPECT_TRANSPORT_REPLY)
         return
 
     data = await state.get_data()
     customer_id = data.get("customer_id")
     specification_id = data.get("specification_id")
     engine_power_text = data.get("engine_power")
-    if not customer_id or not specification_id or not engine_power_text:
+    exchange_rate_text = data.get("exchange_rate")
+    if not customer_id or not specification_id or not engine_power_text or not exchange_rate_text:
         await state.clear()
         await message.answer("Сессия устарела. Начните создание сметы заново.")
         return
 
     engine_power = parse_positive_decimal(engine_power_text)
-    if engine_power is None:
+    exchange_rate = parse_positive_decimal(exchange_rate_text)
+    if engine_power is None or exchange_rate is None:
         await state.clear()
         await message.answer("Сессия устарела. Начните создание сметы заново.")
         return
@@ -134,6 +151,7 @@ async def handle_estimate_exchange_rate(
             specification=specification,
             engine_power=engine_power,
             exchange_rate=exchange_rate,
+            inspect_transport_price=inspect_transport_price,
         )
     except ValueError as error:
         await message.answer(str(error))

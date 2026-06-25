@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS estimates (
     customs_source TEXT,
     customs_raw_response JSONB,
     customs_error TEXT,
+    inspect_transport_price NUMERIC(14, 2) DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -205,6 +206,7 @@ ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL = [
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_source TEXT;",
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_raw_response JSONB;",
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_error TEXT;",
+    "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS inspect_transport_price NUMERIC(14, 2) DEFAULT 0;",
 ]
 
 ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
@@ -1077,6 +1079,7 @@ class Database:
 
         now = datetime.now(timezone.utc)
         async with self._pool.acquire() as connection:
+            await self._delete_estimates_by_specification_id(connection, specification_id)
             estimate_id = await connection.fetchval(
                 """
                 INSERT INTO estimates (
@@ -1105,11 +1108,12 @@ class Database:
                     customs_source,
                     customs_raw_response,
                     customs_error,
+                    inspect_transport_price,
                     created_at,
                     updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26, $26
+                    $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26, $27, $27
                 )
                 RETURNING id;
                 """,
@@ -1140,9 +1144,30 @@ class Database:
                 if data.get("customs_raw_response") is not None
                 else None,
                 data.get("customs_error"),
+                data.get("inspect_transport_price"),
                 now,
             )
             return int(estimate_id)
+
+    async def delete_estimates_by_specification_id(self, specification_id: int) -> None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            await self._delete_estimates_by_specification_id(connection, specification_id)
+
+    async def _delete_estimates_by_specification_id(
+        self,
+        connection: asyncpg.Connection,
+        specification_id: int,
+    ) -> None:
+        await connection.execute(
+            """
+            DELETE FROM estimates
+            WHERE specification_id = $1;
+            """,
+            specification_id,
+        )
 
     async def get_estimate_by_id(self, estimate_id: int) -> dict | None:
         if self._pool is None:
