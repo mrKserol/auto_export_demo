@@ -28,6 +28,14 @@ class CalcusApiError(Exception):
 
 
 @dataclass(frozen=True)
+class CalcusAuthVariant:
+    mode: str
+    headers: dict[str, str]
+    body_extra: dict[str, str] | None = None
+    query_params: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
 class CalcusCustomsResult:
     success: bool
     payload: dict[str, Any] | None = None
@@ -242,16 +250,18 @@ class CalcusCustomsService:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
         last_status: int | None = None
         last_body = ""
-        last_auth_mode = ""
+        last_auth_mode: str | None = None
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for auth_mode, headers in self._auth_header_variants():
-                response, body_text = await self._request_with_headers(
+            for variant in self._build_auth_variants():
+                response, body_text = await self._request_with_auth_variant(
                     session,
-                    headers,
+                    variant,
                     payload,
                 )
+
                 if response.status < 400:
+                    logger.info("Calcus customs API succeeded with auth_mode=%s", variant.mode)
                     try:
                         data = json.loads(body_text)
                     except json.JSONDecodeError as exc:
@@ -261,20 +271,20 @@ class CalcusCustomsService:
                         raise CalcusApiError("Calcus API returned unexpected response format")
                     return data
 
+                last_status = response.status
+                last_body = body_text
+                last_auth_mode = variant.mode
+
                 if response.status in {401, 403}:
                     logger.warning(
                         "Calcus customs API auth failed: status=%s auth_mode=%s body=%s",
                         response.status,
-                        auth_mode,
-                        _short_error_message(body_text, response.status),
+                        variant.mode,
+                        _safe_short_body(body_text),
                     )
-                    last_status = response.status
-                    last_body = body_text
-                    last_auth_mode = auth_mode
                     continue
 
-                short_error = _short_error_message(body_text, response.status)
-                raise CalcusApiError(short_error, status_code=response.status)
+                break
 
         short_error = _short_error_message(last_body, last_status or 401)
         raise CalcusApiError(
@@ -282,50 +292,116 @@ class CalcusCustomsService:
             status_code=last_status,
         )
 
-    def _auth_header_variants(self) -> list[tuple[str, dict[str, str]]]:
+    def _build_auth_variants(self) -> list[CalcusAuthVariant]:
         # If Calcus requires another client-key header, update here.
+        json_headers = {"Content-Type": "application/json"}
         return [
-            (
-                "x-client-id+x-api-key",
-                {
-                    "Content-Type": "application/json",
+            CalcusAuthVariant(
+                mode="x-client-id+x-api-key",
+                headers={
+                    **json_headers,
                     "X-Client-Id": self._client_id,
                     "X-Api-Key": self._api_key,
                 },
             ),
-            (
-                "x-client-id-uppercase+x-api-key",
-                {
-                    "Content-Type": "application/json",
+            CalcusAuthVariant(
+                mode="x-client-id-uppercase+x-api-key",
+                headers={
+                    **json_headers,
                     "X-Client-ID": self._client_id,
                     "X-API-Key": self._api_key,
                 },
             ),
-            (
-                "client-id+api-key",
-                {
-                    "Content-Type": "application/json",
+            CalcusAuthVariant(
+                mode="client-id+api-key",
+                headers={
+                    **json_headers,
                     "Client-Id": self._client_id,
                     "Api-Key": self._api_key,
                 },
             ),
-            (
-                "authorization-bearer+client-id",
-                {
-                    "Content-Type": "application/json",
+            CalcusAuthVariant(
+                mode="authorization-bearer+client-id",
+                headers={
+                    **json_headers,
                     "Authorization": f"Bearer {self._api_key}",
                     "X-Client-Id": self._client_id,
                 },
             ),
+            CalcusAuthVariant(
+                mode="body-client_id-api_key",
+                headers=json_headers,
+                body_extra={
+                    "client_id": self._client_id,
+                    "api_key": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="body-clientId-apiKey",
+                headers=json_headers,
+                body_extra={
+                    "clientId": self._client_id,
+                    "apiKey": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="body-client-key",
+                headers=json_headers,
+                body_extra={
+                    "client": self._client_id,
+                    "key": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="body-client_id-key",
+                headers=json_headers,
+                body_extra={
+                    "client_id": self._client_id,
+                    "key": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="query-client_id-api_key",
+                headers=json_headers,
+                query_params={
+                    "client_id": self._client_id,
+                    "api_key": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="query-clientId-apiKey",
+                headers=json_headers,
+                query_params={
+                    "clientId": self._client_id,
+                    "apiKey": self._api_key,
+                },
+            ),
+            CalcusAuthVariant(
+                mode="query-client-key",
+                headers=json_headers,
+                query_params={
+                    "client": self._client_id,
+                    "key": self._api_key,
+                },
+            ),
         ]
 
-    async def _request_with_headers(
+    async def _request_with_auth_variant(
         self,
         session: aiohttp.ClientSession,
-        headers: dict[str, str],
+        variant: CalcusAuthVariant,
         payload: dict[str, Any],
     ) -> tuple[aiohttp.ClientResponse, str]:
-        async with session.post(self._api_url, json=payload, headers=headers) as response:
+        request_payload = dict(payload)
+        if variant.body_extra:
+            request_payload.update(variant.body_extra)
+
+        async with session.post(
+            self._api_url,
+            json=request_payload,
+            headers=variant.headers,
+            params=variant.query_params,
+        ) as response:
             body_text = await response.text()
             return response, body_text
 
@@ -368,9 +444,14 @@ def _to_decimal_field(value: object) -> float:
 
 
 def _short_error_message(body_text: str, status_code: int) -> str:
-    compact = re.sub(r"\s+", " ", body_text).strip()
-    if compact:
-        if len(compact) > 120:
-            compact = compact[:117] + "..."
+    compact = _safe_short_body(body_text)
+    if compact and compact != "empty body":
         return f"Calcus API error {status_code}: {compact}"
     return f"Calcus API error {status_code}"
+
+
+def _safe_short_body(body_text: str) -> str:
+    compact = re.sub(r"\s+", " ", body_text or "").strip()
+    if len(compact) > 200:
+        compact = compact[:197] + "..."
+    return compact or "empty body"
