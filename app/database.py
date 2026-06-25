@@ -161,6 +161,29 @@ CREATE TABLE IF NOT EXISTS specifications (
 );
 """
 
+CREATE_ESTIMATES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS estimates (
+    id BIGSERIAL PRIMARY KEY,
+    customer_id BIGINT NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    specification_id BIGINT NOT NULL REFERENCES specifications(id) ON DELETE CASCADE,
+    engine_power NUMERIC(10, 2),
+    car_age_category TEXT,
+    price_abroad NUMERIC(14, 2),
+    price_currency TEXT DEFAULT 'CNY',
+    exchange_rate NUMERIC(14, 6),
+    price_rub NUMERIC(14, 2),
+    bank_commission NUMERIC(14, 2),
+    transit_declaration_price NUMERIC(14, 2),
+    insurance_shipment NUMERIC(14, 2),
+    custom_clearing NUMERIC(14, 2),
+    custom_duties NUMERIC(14, 2),
+    contractor_comission NUMERIC(14, 2),
+    total_rub NUMERIC(14, 2),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS by_whom_issued TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_issue TEXT;",
@@ -230,6 +253,8 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_contracts_customer_id ON contracts(customer_id);",
     "CREATE INDEX IF NOT EXISTS idx_contracts_car_id ON contracts(car_id);",
     "CREATE INDEX IF NOT EXISTS idx_customers_specification_id ON customers(specification_id);",
+    "CREATE INDEX IF NOT EXISTS idx_estimates_customer_id ON estimates(customer_id);",
+    "CREATE INDEX IF NOT EXISTS idx_estimates_specification_id ON estimates(specification_id);",
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -314,6 +339,7 @@ class Database:
             await connection.execute(CREATE_CARS_TABLE_SQL)
             await connection.execute(CREATE_CONTRACTS_TABLE_SQL)
             await connection.execute(CREATE_SPECIFICATIONS_TABLE_SQL)
+            await connection.execute(CREATE_ESTIMATES_TABLE_SQL)
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
                 await connection.execute(statement)
             await connection.execute(ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL)
@@ -1012,6 +1038,90 @@ class Database:
                 datetime.now(timezone.utc),
             )
             return _record_to_dict(row)
+
+
+    async def create_estimate(
+        self,
+        *,
+        customer_id: int,
+        specification_id: int,
+        data: dict,
+    ) -> int:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            estimate_id = await connection.fetchval(
+                """
+                INSERT INTO estimates (
+                    customer_id,
+                    specification_id,
+                    engine_power,
+                    car_age_category,
+                    price_abroad,
+                    price_currency,
+                    exchange_rate,
+                    price_rub,
+                    bank_commission,
+                    transit_declaration_price,
+                    insurance_shipment,
+                    custom_clearing,
+                    custom_duties,
+                    contractor_comission,
+                    total_rub,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16
+                )
+                RETURNING id;
+                """,
+                customer_id,
+                specification_id,
+                data.get("engine_power"),
+                data.get("car_age_category"),
+                data.get("price_abroad"),
+                data.get("price_currency"),
+                data.get("exchange_rate"),
+                data.get("price_rub"),
+                data.get("bank_commission"),
+                data.get("transit_declaration_price"),
+                data.get("insurance_shipment"),
+                data.get("custom_clearing"),
+                data.get("custom_duties"),
+                data.get("contractor_comission"),
+                data.get("total_rub"),
+                now,
+            )
+            return int(estimate_id)
+
+    async def get_estimate_by_id(self, estimate_id: int) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM estimates WHERE id = $1;",
+                estimate_id,
+            )
+            return _record_to_dict(row) if row else None
+
+    async def get_estimate_by_customer_id(self, customer_id: int) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT * FROM estimates
+                WHERE customer_id = $1
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                customer_id,
+            )
+            return _record_to_dict(row) if row else None
 
 
 def _record_to_dict(record: asyncpg.Record | None) -> dict:

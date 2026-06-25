@@ -23,6 +23,14 @@ def build_customer_card_keyboard(customer: dict, *, is_admin: bool) -> InlineKey
                 ),
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Создать смету",
+                    callback_data=f"estimate:create:{customer_id}",
+                )
+            ]
+        )
     else:
         rows.append(
             [
