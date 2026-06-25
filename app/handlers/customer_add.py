@@ -15,13 +15,10 @@ from app.services.customer_card_service import (
     build_customer_card_keyboard,
     format_customer_fio,
 )
-from app.services.customer_extraction_service import (
-    extract_passport_main_fields,
-    extract_registration_fields,
-    extract_snils_fields,
-    extract_tin_fields,
-    person_names_match,
+from app.services.customer_document_recognition_service import (
+    CustomerDocumentRecognitionService,
 )
+from app.services.customer_extraction_service import person_names_match
 from app.services.file_service import (
     build_stored_filename,
     get_original_filename,
@@ -36,7 +33,6 @@ from app.services.validation_service import (
 )
 from app.states.customer_states import CustomerAddStates
 from app.yadisk_client import YandexDiskClient
-from app.yandex_function_client import YandexFunctionClient
 
 
 router = Router(name="customer_add")
@@ -59,37 +55,26 @@ async def handle_passport_main_upload(
     state: FSMContext,
     bot: Bot,
     yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
+    customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
     response_payload = await _upload_customer_file(message, bot, yandex_disk_client)
     if response_payload is None:
         return
 
-    if not enable_processing or yandex_function_client is None:
-        await message.answer(
-            "Автообработка недоступна. Загрузите файл снова после включения OCR."
-        )
-        return
-
     try:
-        ocr_response = await yandex_function_client.process_document(
-            document_id=0,
-            file_path=response_payload["path"],
-            original_filename=response_payload["original_filename"],
-            mime_type=response_payload["mime_type"],
-            telegram_chat_id=message.chat.id,
-            telegram_message_id=message.message_id,
+        fields = await customer_document_recognition_service.recognize_passport_main(
+            response_payload["content"],
+            response_payload["mime_type"],
+            filename=response_payload["original_filename"],
         )
     except Exception:
-        logger.exception("Passport main OCR failed")
+        logger.exception("Passport main recognition failed")
         await message.answer(
             "Не удалось распознать номер паспорта. "
             "Загрузите корректный файл паспорта со страницами 2 и 3."
         )
         return
 
-    fields = extract_passport_main_fields(ocr_response)
     passport = fields.get("passport")
     if not passport:
         await message.answer(
@@ -117,8 +102,7 @@ async def handle_registration_upload(
     state: FSMContext,
     bot: Bot,
     yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
+    customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
@@ -132,31 +116,21 @@ async def handle_registration_upload(
     if response_payload is None:
         return
 
-    if not enable_processing or yandex_function_client is None:
-        await message.answer(
-            "Автообработка недоступна. Загрузите файл снова или нажмите «Ввести вручную».",
-            reply_markup=_manual_registration_keyboard(),
-        )
-        return
-
     try:
-        ocr_response = await yandex_function_client.process_document(
-            document_id=0,
-            file_path=response_payload["path"],
-            original_filename=response_payload["original_filename"],
-            mime_type=response_payload["mime_type"],
-            telegram_chat_id=message.chat.id,
-            telegram_message_id=message.message_id,
+        reg_fields = await customer_document_recognition_service.recognize_passport_registration(
+            response_payload["content"],
+            response_payload["mime_type"],
+            expected_passport=expected_passport,
+            filename=response_payload["original_filename"],
         )
     except Exception:
-        logger.exception("Registration OCR failed")
+        logger.exception("Registration recognition failed")
         await message.answer(
             "Не удалось обработать файл регистрации.",
             reply_markup=_manual_registration_keyboard(),
         )
         return
 
-    reg_fields = extract_registration_fields(ocr_response)
     found_passport = reg_fields.get("passport")
     if found_passport and found_passport != expected_passport:
         await message.answer(
@@ -210,8 +184,7 @@ async def handle_snils_upload(
     state: FSMContext,
     bot: Bot,
     yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
+    customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
@@ -219,31 +192,20 @@ async def handle_snils_upload(
     if response_payload is None:
         return
 
-    if not enable_processing or yandex_function_client is None:
-        await message.answer(
-            "Автообработка недоступна.",
-            reply_markup=_manual_snils_keyboard(),
-        )
-        return
-
     try:
-        ocr_response = await yandex_function_client.process_document(
-            document_id=0,
-            file_path=response_payload["path"],
-            original_filename=response_payload["original_filename"],
-            mime_type=response_payload["mime_type"],
-            telegram_chat_id=message.chat.id,
-            telegram_message_id=message.message_id,
+        snils_fields = await customer_document_recognition_service.recognize_snils(
+            response_payload["content"],
+            response_payload["mime_type"],
+            filename=response_payload["original_filename"],
         )
     except Exception:
-        logger.exception("SNILS OCR failed")
+        logger.exception("SNILS recognition failed")
         await message.answer(
             "Не удалось обработать файл СНИЛС.",
             reply_markup=_manual_snils_keyboard(),
         )
         return
 
-    snils_fields = extract_snils_fields(ocr_response)
     if not person_names_match(customer_fields, snils_fields):
         await message.answer(
             "ФИО не совпадает, загрузите соответствующий файл.",
@@ -296,8 +258,7 @@ async def handle_tin_upload(
     state: FSMContext,
     bot: Bot,
     yandex_disk_client: YandexDiskClient,
-    yandex_function_client: YandexFunctionClient | None,
-    enable_processing: bool,
+    customer_document_recognition_service: CustomerDocumentRecognitionService,
 ) -> None:
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
@@ -305,31 +266,20 @@ async def handle_tin_upload(
     if response_payload is None:
         return
 
-    if not enable_processing or yandex_function_client is None:
-        await message.answer(
-            "Автообработка недоступна.",
-            reply_markup=_manual_tin_keyboard(),
-        )
-        return
-
     try:
-        ocr_response = await yandex_function_client.process_document(
-            document_id=0,
-            file_path=response_payload["path"],
-            original_filename=response_payload["original_filename"],
-            mime_type=response_payload["mime_type"],
-            telegram_chat_id=message.chat.id,
-            telegram_message_id=message.message_id,
+        tin_fields = await customer_document_recognition_service.recognize_tin(
+            response_payload["content"],
+            response_payload["mime_type"],
+            filename=response_payload["original_filename"],
         )
     except Exception:
-        logger.exception("TIN OCR failed")
+        logger.exception("TIN recognition failed")
         await message.answer(
             "Не удалось обработать файл ИНН.",
             reply_markup=_manual_tin_keyboard(),
         )
         return
 
-    tin_fields = extract_tin_fields(ocr_response)
     if not person_names_match(customer_fields, tin_fields):
         await message.answer(
             "ФИО не совпадает, загрузите соответствующий файл.",
@@ -539,6 +489,7 @@ async def _upload_customer_file(
         "path": uploaded_path,
         "original_filename": original_filename,
         "mime_type": mime_type,
+        "content": file_content,
     }
 
 
