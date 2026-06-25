@@ -15,6 +15,10 @@ from app.services.contract_generation_service import (
     TemplateNotFoundError,
     generate_customer_contract_docx,
 )
+from app.services.estimate_excel_generation_service import (
+    EstimateExcelTemplateNotFoundError,
+    generate_estimate_excel,
+)
 from app.services.estimate_service import (
     create_estimate,
     format_estimate_summary,
@@ -360,3 +364,51 @@ def _parse_fsm_estimate_values(data: dict) -> tuple | None:
         insurance_shipment,
         custom_clearing,
     )
+
+
+@router.callback_query(F.data.startswith("estimate:excel:"))
+async def handle_estimate_excel(callback: CallbackQuery, database: Database) -> None:
+    if callback.message is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректная команда", show_alert=True)
+        return
+
+    try:
+        customer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный ID клиента", show_alert=True)
+        return
+
+    estimate = await database.get_estimate_by_customer_id(customer_id)
+    if not estimate:
+        await callback.message.answer("Смета для клиента ещё не создана.")
+        await callback.answer()
+        return
+
+    specification = None
+    specification_id = estimate.get("specification_id")
+    if specification_id:
+        specification = await database.get_specification_by_id(int(specification_id))
+
+    try:
+        file_path = generate_estimate_excel(estimate, specification)
+    except EstimateExcelTemplateNotFoundError:
+        await callback.message.answer("Шаблон сметы не найден: templates/smeta_template.xlsx")
+        await callback.answer()
+        return
+    except Exception:
+        logger.exception("Failed to generate estimate Excel for customer_id=%s", customer_id)
+        await callback.message.answer(
+            "Не удалось сформировать Excel-смету. Проверьте шаблон."
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer_document(
+        FSInputFile(file_path),
+        caption="Смета Excel сформирована.",
+    )
+    await callback.answer()

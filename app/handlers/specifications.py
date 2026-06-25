@@ -213,7 +213,9 @@ async def handle_spec_edit_back(
     await state.update_data(customer_id=customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+        reply_markup=await build_customer_card_keyboard(
+            customer, database, is_admin=is_admin
+        ),
     )
     await callback.answer()
 
@@ -499,7 +501,9 @@ async def _finalize_specification(
 
     await message.answer(
         "✅ Спецификация добавлена\n\n" + await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+        reply_markup=await build_customer_card_keyboard(
+            customer, database, is_admin=is_admin
+        ),
     )
 
 

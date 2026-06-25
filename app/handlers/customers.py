@@ -75,7 +75,9 @@ async def handle_search_passport(
     )
     await message.answer(
         await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+        reply_markup=await build_customer_card_keyboard(
+            customer, database, is_admin=is_admin
+        ),
     )
 
 
@@ -167,8 +169,9 @@ async def handle_customer_edit_back(
     await state.update_data(customer_id=customer_id)
     await callback.message.answer(
         await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(
+        reply_markup=await build_customer_card_keyboard(
             customer,
+            database,
             is_admin=await is_admin_for_customer_management(
                 bot, callback.message.chat.id, callback.from_user.id
             ),
@@ -231,7 +234,9 @@ async def handle_customer_new_value(
     )
     await message.answer(
         await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+        reply_markup=await build_customer_card_keyboard(
+            customer, database, is_admin=is_admin
+        ),
     )
     await state.set_state(CustomerEditStates.choosing_action)
 

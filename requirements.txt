@@ -4,4 +4,4 @@ asyncpg>=0.29,<1
 docxtpl>=0.16,<1
 PyMuPDF>=1.24,<2
 Pillow>=10,<12
-pillow-heif>=0.16,<1
+openpyxl>=3.1,<4

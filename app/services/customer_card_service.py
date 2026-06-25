@@ -6,7 +6,12 @@ from app.database import Database
 from app.services.specification_edit_service import format_specification_text
 
 
-def build_customer_card_keyboard(customer: dict, *, is_admin: bool) -> InlineKeyboardMarkup:
+async def build_customer_card_keyboard(
+    customer: dict,
+    database: Database,
+    *,
+    is_admin: bool,
+) -> InlineKeyboardMarkup:
     customer_id = int(customer["id"])
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -23,6 +28,16 @@ def build_customer_card_keyboard(customer: dict, *, is_admin: bool) -> InlineKey
                 ),
             ]
         )
+        estimate = await database.get_estimate_by_customer_id(customer_id)
+        if estimate:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Сформировать смету Excel",
+                        callback_data=f"estimate:excel:{customer_id}",
+                    )
+                ]
+            )
     else:
         rows.append(
             [

@@ -400,7 +400,9 @@ async def handle_add_customer_email(
         await message.answer(
             "Клиент с таким паспортом уже существует.\n\n"
             + await build_customer_card(existing, database),
-            reply_markup=build_customer_card_keyboard(existing, is_admin=is_admin),
+            reply_markup=await build_customer_card_keyboard(
+                existing, database, is_admin=is_admin
+            ),
         )
         return
 
@@ -418,7 +420,9 @@ async def handle_add_customer_email(
     )
     await message.answer(
         "✅ Клиент добавлен\n\n" + await build_customer_card(customer, database),
-        reply_markup=build_customer_card_keyboard(customer, is_admin=is_admin),
+        reply_markup=await build_customer_card_keyboard(
+            customer, database, is_admin=is_admin
+        ),
     )
 
 
