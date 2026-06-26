@@ -5,6 +5,7 @@ class CustomerAddStates(StatesGroup):
     waiting_passport_main = State()
     waiting_passport_confirmation = State()
     waiting_manual_passport_number = State()
+    waiting_manual_passport_fio = State()
     waiting_manual_passport_issuer = State()
     waiting_manual_passport_date_issue = State()
     waiting_manual_passport_department_code = State()

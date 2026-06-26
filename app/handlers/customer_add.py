@@ -195,6 +195,22 @@ async def handle_passport_edit_passport_start(callback: CallbackQuery, state: FS
 
 @router.callback_query(
     StateFilter(CustomerAddStates.waiting_passport_confirmation),
+    F.data == "add_customer_passport_edit:fio",
+)
+async def handle_passport_edit_fio_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+
+    await state.set_state(CustomerAddStates.waiting_manual_passport_fio)
+    await callback.message.answer(
+        "Введите ФИО в формате:\n"
+        "Иванов Иван Иванович"
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(CustomerAddStates.waiting_passport_confirmation),
     F.data == "add_customer_passport_edit:by_whom_issued",
 )
 async def handle_passport_edit_issuer_start(callback: CallbackQuery, state: FSMContext) -> None:
@@ -253,6 +269,26 @@ async def handle_manual_passport_number(message: Message, state: FSMContext) -> 
     data = await state.get_data()
     customer_fields = dict(data.get("customer_fields") or {})
     customer_fields["passport"] = passport
+    await state.update_data(customer_fields=customer_fields)
+    await state.set_state(CustomerAddStates.waiting_passport_confirmation)
+    await _show_passport_confirmation(message, customer_fields)
+
+
+@router.message(StateFilter(CustomerAddStates.waiting_manual_passport_fio), F.text)
+async def handle_manual_passport_fio(message: Message, state: FSMContext) -> None:
+    fio_fields = _parse_manual_fio(message.text)
+    if not fio_fields:
+        await message.answer(
+            "Неверный формат ФИО. Введите фамилию и имя через пробел.\n"
+            "Пример: Иванов Иван Иванович"
+        )
+        return
+
+    data = await state.get_data()
+    customer_fields = dict(data.get("customer_fields") or {})
+    customer_fields.update(fio_fields)
+    if "surname" not in fio_fields:
+        customer_fields.pop("surname", None)
     await state.update_data(customer_fields=customer_fields)
     await state.set_state(CustomerAddStates.waiting_passport_confirmation)
     await _show_passport_confirmation(message, customer_fields)
@@ -921,6 +957,20 @@ def _passport_required_fields_complete(customer_fields: dict) -> bool:
     return all(customer_fields.get(key) for key in required_keys)
 
 
+def _parse_manual_fio(text: str | None) -> dict[str, str] | None:
+    tokens = (text or "").split()
+    if len(tokens) < 2:
+        return None
+
+    result: dict[str, str] = {
+        "last_name": tokens[0],
+        "first_name": tokens[1],
+    }
+    if len(tokens) >= 3:
+        result["surname"] = " ".join(tokens[2:])
+    return result
+
+
 async def _show_passport_confirmation(message: Message, customer_fields: dict) -> None:
     await message.answer(
         "Паспорт распознан.\n\n"
@@ -960,6 +1010,12 @@ def _passport_edit_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Номер паспорта",
                     callback_data="add_customer_passport_edit:passport",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Исправить ФИО",
+                    callback_data="add_customer_passport_edit:fio",
                 )
             ],
             [
