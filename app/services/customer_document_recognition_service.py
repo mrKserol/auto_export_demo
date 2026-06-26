@@ -23,13 +23,11 @@ from app.services.yandex_ocr_service import YandexOCRService
 
 logger = logging.getLogger(__name__)
 
-PASSPORT_MAIN_PROMPT = """Ты извлекаешь данные только с главного разворота паспорта РФ.
-
+PASSPORT_MAIN_PROMPT = """Ты извлекаешь данные из паспорта гражданина РФ, страница 2-3 (разворот с фотографией).
 OCR текст документа:
 ---
 {ocr_text}
 ---
-
 Верни только валидный JSON без markdown и без пояснений в таком формате:
 {{
   "document_type": "passport_main",
@@ -53,28 +51,18 @@ OCR текст документа:
   }},
   "warnings": []
 }}
-
-Важно про номер паспорта:
-- Номер паспорта РФ состоит из 10 цифр: серия 4 цифры + номер 6 цифр.
-- На фото паспорта серия и номер часто напечатаны красными цифрами вертикально сбоку страницы.
-- Обычно это выглядит как:
-  80
-  23
-  694346
-  Значит паспорт: 80 23 694346.
-- Не используй нижнюю машинночитаемую строку MRZ.
-- MRZ обычно содержит PNRUS, RUS, символы <<, латинские буквы и длинные строки внизу паспорта.
-- Не используй даты как номер паспорта.
-- Не используй дату рождения.
-- Не используй дату выдачи.
-- Не используй код подразделения формата 000-000.
-- Если не уверен в номере паспорта — верни null.
-- Лучше вернуть null, чем неверный номер.
-
 Правила:
-- Паспорт храни в формате "80 23 694346".
-- Код подразделения в формате "000-000".
+- Извлекай только данные главной страницы паспорта.
+- Паспорт храни в формате "80 06 035956".
+- Серия паспорта — 4 цифры, номер — 6 цифр.
+- Серия и номер паспорта часто напечатаны красными цифрами сбоку страницы.
+- Не используй нижнюю машинночитаемую строку MRZ как номер паспорта.
+- MRZ обычно содержит PNRUS, RUS, символы << и латинскую транслитерацию имени.
+- Код подразделения имеет формат "000-000".
 - Дата выдачи в формате DD.MM.YYYY.
+- Поле by_whom_issued — это орган, который выдал паспорт.
+- Не возвращай в by_whom_issued саму подпись поля "Паспорт выдан".
+- Если после слов "Паспорт выдан" указан орган, например "МВД ПО РЕСПУБЛИКЕ БАШКОРТОСТАН", верни именно этот орган.
 - Не придумывай данные.
 - Если поле не найдено — null.
 """
@@ -256,12 +244,11 @@ class CustomerDocumentRecognitionService:
         *,
         filename: str | None = None,
     ) -> dict:
-        ocr_text = await self._run_ocr_with_rotation(
+        ocr_text = await self._run_ocr(
             "passport_main",
             file_content,
             mime_type,
             filename=filename,
-            score_profile="passport_main",
         )
         guard = await self._detect_document_type_from_ocr(ocr_text)
         if not _is_document_type_allowed(guard, "passport_main"):
@@ -631,26 +618,19 @@ def _build_document_type_mismatch(expected_document_type: str, guard: dict) -> d
 def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
     text_without_mrz = _remove_mrz_lines(ocr_text)
 
-    passport = _validate_passport_candidate(gpt_json.get("passport"), ocr_text)
-
-    if not passport:
-        passport = _validate_passport_candidate(
-            _extract_passport_side_number_simple(text_without_mrz),
-            ocr_text,
-        )
-
+    passport = _normalize_passport_value(gpt_json.get("passport"))
     if not passport:
         series = _clean_text(gpt_json.get("passport_series"))
         number = _clean_text(gpt_json.get("passport_number"))
         if series and number:
-            passport = _validate_passport_candidate(f"{series}{number}", ocr_text)
+            passport = normalize_passport(f"{series}{number}")
 
     fields = {
         "passport": passport,
         "first_name": _clean_text(gpt_json.get("first_name")),
         "last_name": _clean_text(gpt_json.get("last_name")),
         "surname": _clean_text(gpt_json.get("surname")),
-        "by_whom_issued": _clean_text(gpt_json.get("by_whom_issued")),
+        "by_whom_issued": _clean_passport_issuer(gpt_json.get("by_whom_issued")),
         "date_issue": normalize_date(_clean_text(gpt_json.get("date_issue"))),
         "department_code": normalize_department_code(_clean_text(gpt_json.get("department_code"))),
     }
@@ -660,27 +640,130 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         if key == "passport":
             continue
         if value and not fields.get(key):
-            fields[key] = value
+            if key == "by_whom_issued":
+                fields[key] = _clean_passport_issuer(value)
+            else:
+                fields[key] = value
 
-    if not fields["department_code"]:
+    if not fields.get("by_whom_issued"):
+        fields["by_whom_issued"] = _extract_passport_issuer_fallback(ocr_text)
+
+    if not fields.get("date_issue"):
+        fields["date_issue"] = _extract_issue_date_fallback(ocr_text)
+    if not fields.get("date_issue"):
+        fields["date_issue"] = normalize_date(ocr_text)
+
+    if not fields.get("department_code"):
+        fields["department_code"] = _extract_department_code_fallback(ocr_text)
+    if not fields.get("department_code"):
         code_match = re.search(r"\b\d{3}-\d{3}\b", ocr_text)
         if code_match:
             fields["department_code"] = normalize_department_code(code_match.group(0))
 
-    if not fields["date_issue"]:
-        fields["date_issue"] = normalize_date(ocr_text)
+    if not fields.get("passport"):
+        passport_match = re.search(r"\b(\d{2})\s*(\d{2})\s*(\d{6})\b", text_without_mrz)
+        if passport_match:
+            candidate = (
+                f"{passport_match.group(1)}{passport_match.group(2)}{passport_match.group(3)}"
+            )
+            fields["passport"] = normalize_passport(candidate)
 
     if not fields.get("passport"):
-        logger.warning("Passport number not found after simplified extraction")
-
-    if fields.get("passport"):
-        fields["passport"] = _fix_reversed_passport_series_pair(
-            fields["passport"],
-            ocr_text,
-            fields.get("date_issue"),
-        )
+        logger.warning("Passport number not found after passport main extraction")
 
     return {key: value for key, value in fields.items() if value}
+
+
+def _clean_passport_issuer(value: str | None) -> str | None:
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+    normalized = cleaned.upper().replace("Ё", "Е").strip()
+    bad_values = {
+        "ПАСПОРТ ВЫДАН",
+        "ПАСПОРТ ВЫДАН:",
+        "КЕМ ВЫДАН",
+        "КЕМ ВЫДАН:",
+    }
+    if normalized in bad_values:
+        return None
+    return cleaned
+
+
+def _extract_passport_issuer_fallback(ocr_text: str) -> str | None:
+    lines = [
+        line.strip()
+        for line in (ocr_text or "").splitlines()
+        if line and line.strip()
+    ]
+    for index, line in enumerate(lines):
+        normalized = line.upper().replace("Ё", "Е")
+        if "ПАСПОРТ ВЫДАН" not in normalized and "КЕМ ВЫДАН" not in normalized:
+            continue
+        candidates: list[str] = []
+        same_line = re.sub(
+            r"(?i).*?(паспорт\s+выдан|кем\s+выдан)[:\s-]*",
+            "",
+            line,
+        ).strip()
+        if same_line and same_line.upper().replace("Ё", "Е") not in {"ПАСПОРТ ВЫДАН", "КЕМ ВЫДАН"}:
+            candidates.append(same_line)
+        for next_line in lines[index + 1 : index + 5]:
+            next_norm = next_line.upper().replace("Ё", "Е")
+            if "ДАТА ВЫДАЧИ" in next_norm:
+                break
+            if "КОД ПОДРАЗДЕЛЕНИЯ" in next_norm:
+                break
+            if re.search(r"\d{2}\.\d{2}\.\d{4}", next_line):
+                break
+            if re.search(r"\d{3}-\d{3}", next_line):
+                break
+            if len(next_line) >= 5:
+                candidates.append(next_line)
+        if candidates:
+            issuer = re.sub(r"\s+", " ", " ".join(candidates)).strip()
+            return _clean_passport_issuer(issuer)
+    return None
+
+
+def _extract_issue_date_fallback(ocr_text: str) -> str | None:
+    lines = [
+        line.strip()
+        for line in (ocr_text or "").splitlines()
+        if line and line.strip()
+    ]
+    for index, line in enumerate(lines):
+        normalized = line.upper().replace("Ё", "Е")
+        if "ДАТА ВЫДАЧИ" not in normalized:
+            continue
+        date_match = re.search(r"\b\d{2}[.\-/]\d{2}[.\-/]\d{4}\b", line)
+        if date_match:
+            return normalize_date(date_match.group(0))
+        for next_line in lines[index : index + 4]:
+            date_match = re.search(r"\b\d{2}[.\-/]\d{2}[.\-/]\d{4}\b", next_line)
+            if date_match:
+                return normalize_date(date_match.group(0))
+    return None
+
+
+def _extract_department_code_fallback(ocr_text: str) -> str | None:
+    lines = [
+        line.strip()
+        for line in (ocr_text or "").splitlines()
+        if line and line.strip()
+    ]
+    for index, line in enumerate(lines):
+        normalized = line.upper().replace("Ё", "Е")
+        if "КОД ПОДРАЗДЕЛЕНИЯ" not in normalized:
+            continue
+        code_match = re.search(r"\b\d{3}-\d{3}\b", line)
+        if code_match:
+            return normalize_department_code(code_match.group(0))
+        for next_line in lines[index : index + 4]:
+            code_match = re.search(r"\b\d{3}-\d{3}\b", next_line)
+            if code_match:
+                return normalize_department_code(code_match.group(0))
+    return None
 
 
 def _remove_mrz_lines(ocr_text: str) -> str:
