@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ayum.translit import to_latin
+from transliterate import translit
 
 _NAME_TO_TRANSLIT = (
     ("first_name", "first_name_translit"),
@@ -13,7 +13,7 @@ def transliterate_russian_name(value: str | None) -> str | None:
     text = (value or "").strip()
     if not text:
         return None
-    transliterated = to_latin(text).strip()
+    transliterated = translit(text, "ru", reversed=True).strip()
     return transliterated or None
 
 
