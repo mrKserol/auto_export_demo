@@ -217,10 +217,11 @@ async def handle_customer_delete_spec(
     if callback.message is None or callback.from_user is None:
         return
 
-    # Check admin rights
-    if not await is_admin_for_customer_management(bot, callback.message.chat.id, callback.from_user.id):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
+    # Allow in private chat (the user who opened the card) or admins in groups.
+    if callback.message.chat.type != "private":
+        if not await is_admin_for_customer_management(bot, callback.message.chat.id, callback.from_user.id):
+            await callback.answer("Недостаточно прав", show_alert=True)
+            return
 
     try:
         customer_id = int(callback.data.split(":", 1)[1])
