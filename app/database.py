@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import secrets
 
 import asyncpg
 
@@ -197,6 +198,17 @@ CREATE TABLE IF NOT EXISTS estimates (
 );
 """
 
+CREATE_MINI_APP_LAUNCH_CODES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS mini_app_launch_codes (
+    code TEXT PRIMARY KEY,
+    context_token TEXT NOT NULL,
+    telegram_user_id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    exp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL = [
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_sbor NUMERIC(14, 2) DEFAULT 0;",
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_tax NUMERIC(14, 2) DEFAULT 0;",
@@ -372,6 +384,7 @@ class Database:
             await connection.execute(CREATE_CONTRACTS_TABLE_SQL)
             await connection.execute(CREATE_SPECIFICATIONS_TABLE_SQL)
             await connection.execute(CREATE_ESTIMATES_TABLE_SQL)
+            await connection.execute(CREATE_MINI_APP_LAUNCH_CODES_TABLE_SQL)
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
                 await connection.execute(statement)
             for statement in ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL:
@@ -1034,6 +1047,69 @@ class Database:
                     )
 
                 return True
+
+    async def create_mini_app_launch_code(
+        self,
+        *,
+        context_token: str,
+        telegram_user_id: int,
+        customer_id: int,
+        ttl_seconds: int,
+    ) -> str:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        code = secrets.token_urlsafe(12)
+        exp = datetime.now(timezone.utc) + timedelta(seconds=int(ttl_seconds))
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO mini_app_launch_codes (
+                    code, context_token, telegram_user_id, customer_id, exp
+                ) VALUES ($1, $2, $3, $4, $5);
+                """,
+                code,
+                context_token,
+                int(telegram_user_id),
+                int(customer_id),
+                exp,
+            )
+        return code
+
+    async def consume_mini_app_launch_code(
+        self,
+        code: str,
+        *,
+        telegram_user_id: int,
+    ) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT code, context_token, telegram_user_id, customer_id, exp
+                    FROM mini_app_launch_codes
+                    WHERE code = $1
+                    FOR UPDATE;
+                    """,
+                    code,
+                )
+                if row is None:
+                    return None
+
+                await connection.execute(
+                    "DELETE FROM mini_app_launch_codes WHERE code = $1;",
+                    code,
+                )
+
+                if int(row["telegram_user_id"]) != int(telegram_user_id):
+                    return None
+                if row["exp"] < datetime.now(timezone.utc):
+                    return None
+
+                return _record_to_dict(row)
 
     async def create_specification(self, data: dict) -> int:
         if self._pool is None:

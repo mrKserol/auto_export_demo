@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
+import uvicorn
 from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.config import Settings
@@ -22,6 +24,7 @@ from app.services.customer_document_recognition_service import (
 )
 from app.services.yandex_gpt_service import YandexGPTService
 from app.services.yandex_ocr_service import YandexOCRService
+from app.web.app import create_fastapi_app
 from app.yadisk_client import YandexDiskClient
 from app.yandex_function_client import YandexFunctionClient
 
@@ -47,6 +50,10 @@ def create_dispatcher() -> Dispatcher:
 
 
 async def run_bot(settings: Settings) -> None:
+    await run_application(settings)
+
+
+async def run_application(settings: Settings) -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -78,18 +85,58 @@ async def run_bot(settings: Settings) -> None:
         gpt_service=yandex_gpt_service,
     )
 
+    fastapi_app = create_fastapi_app(
+        settings=settings,
+        database=database,
+        bot=bot,
+    )
+    uvicorn_config = uvicorn.Config(
+        fastapi_app,
+        host=settings.web_host,
+        port=settings.web_port,
+        log_level="info",
+        loop="asyncio",
+    )
+    web_server = uvicorn.Server(uvicorn_config)
+
     await database.connect()
     await yandex_disk_client.ensure_base_path()
 
-    try:
-        await dispatcher.start_polling(
+    polling_task = asyncio.create_task(
+        dispatcher.start_polling(
             bot,
+            settings=settings,
             database=database,
             yandex_disk_client=yandex_disk_client,
             yandex_function_client=yandex_function_client,
             customer_document_recognition_service=customer_document_recognition_service,
             enable_processing=settings.enable_processing,
+        ),
+        name="aiogram-polling",
+    )
+    web_task = asyncio.create_task(web_server.serve(), name="uvicorn")
+
+    try:
+        done, pending = await asyncio.wait(
+            {polling_task, web_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in done:
+            if task.cancelled():
+                continue
+            exception = task.exception()
+            if exception is not None:
+                logging.getLogger(__name__).error(
+                    "Background task failed: %s",
+                    exception,
+                    exc_info=exception,
+                )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
     finally:
+        web_server.should_exit = True
+        await dispatcher.stop_polling()
         await database.close()
         await bot.session.close()
