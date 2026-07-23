@@ -25,6 +25,7 @@ from app.services.file_service import (
     get_file_extension,
     get_original_filename,
 )
+from app.services.name_transliteration_service import apply_name_transliteration
 from app.services.validation_service import (
     normalize_date,
     normalize_department_code,
@@ -738,12 +739,14 @@ async def handle_add_customer_email(
         )
         return
 
-    customer_data = {
-        **customer_fields,
-        "phone": phone,
-        "email": email,
-        "specification_id": None,
-    }
+    customer_data = apply_name_transliteration(
+        {
+            **customer_fields,
+            "phone": phone,
+            "email": email,
+            "specification_id": None,
+        }
+    )
     customer = await database.create_customer(customer_data)
     await state.clear()
 

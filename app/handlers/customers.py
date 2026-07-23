@@ -25,6 +25,10 @@ from app.services.validation_service import (
     validate_name,
     validate_registration_address,
 )
+from app.services.name_transliteration_service import (
+    translit_field_for_name,
+    transliterate_russian_name,
+)
 from app.states.customer_states import CustomerEditStates
 
 
@@ -236,7 +240,17 @@ async def handle_customer_new_value(
             await message.answer("Клиент с таким паспортом уже существует")
             return
 
-    customer = await database.update_customer(customer_id, field_name, normalized)
+    translit_field = translit_field_for_name(field_name)
+    if translit_field:
+        customer = await database.update_customer_fields(
+            customer_id,
+            {
+                field_name: normalized,
+                translit_field: transliterate_russian_name(str(normalized)),
+            },
+        )
+    else:
+        customer = await database.update_customer(customer_id, field_name, normalized)
     is_admin = await is_admin_for_customer_management(
         bot, message.chat.id, message.from_user.id if message.from_user else 0
     )

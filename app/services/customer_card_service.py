@@ -111,6 +111,15 @@ def format_customer_fio(customer: dict) -> str:
     return " ".join(part for part in fio_parts if part) or "—"
 
 
+def format_customer_fio_translit(customer: dict) -> str:
+    fio_parts = [
+        customer.get("last_name_translit"),
+        customer.get("first_name_translit"),
+        customer.get("surname_translit"),
+    ]
+    return " ".join(part for part in fio_parts if part) or "—"
+
+
 async def build_specification_block(
     specification_id: int | None,
     database: Database,
@@ -130,6 +139,7 @@ async def build_customer_card(customer: dict, database: Database) -> str:
         f"Клиент #{customer.get('id')}\n\n"
         f"Паспорт: {customer.get('passport') or '—'}\n"
         f"ФИО: {format_customer_fio(customer)}\n"
+        f"ФИО (лат.): {format_customer_fio_translit(customer)}\n"
         f"Дата выдачи: {customer.get('date_issue') or '—'}\n"
         f"Кем выдан: {customer.get('by_whom_issued') or '—'}\n"
         f"Код подразделения: {customer.get('department_code') or '—'}\n"

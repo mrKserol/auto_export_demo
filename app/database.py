@@ -219,6 +219,9 @@ ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS registration_address TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS department_code TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS specification_id BIGINT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS first_name_translit TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_name_translit TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS surname_translit TEXT;",
 ]
 
 ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL = """
@@ -804,6 +807,9 @@ class Database:
                     first_name,
                     last_name,
                     surname,
+                    first_name_translit,
+                    last_name_translit,
+                    surname_translit,
                     tin,
                     ipain,
                     phone,
@@ -815,13 +821,19 @@ class Database:
                     specification_id,
                     created_at,
                     updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, $16, $17, $17
+                )
                 RETURNING *;
                 """,
                 data["passport"],
                 data.get("first_name"),
                 data.get("last_name"),
                 data.get("surname"),
+                data.get("first_name_translit"),
+                data.get("last_name_translit"),
+                data.get("surname_translit"),
                 data.get("tin"),
                 data.get("ipain"),
                 data.get("phone"),
@@ -841,6 +853,9 @@ class Database:
             "first_name",
             "last_name",
             "surname",
+            "first_name_translit",
+            "last_name_translit",
+            "surname_translit",
             "tin",
             "ipain",
             "phone",
@@ -891,6 +906,40 @@ class Database:
                 customer_id,
                 value,
                 datetime.now(timezone.utc),
+            )
+            return _record_to_dict(row)
+
+    async def update_customer_fields(
+        self,
+        customer_id: int,
+        fields: dict[str, str | int | None],
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        if not fields:
+            raise ValueError("No fields to update")
+
+        unknown = set(fields) - self._CUSTOMER_UPDATABLE_FIELDS
+        if unknown:
+            raise ValueError(f"Fields are not updatable: {', '.join(sorted(unknown))}")
+
+        assignments = []
+        values: list[object] = [customer_id]
+        for index, (field_name, value) in enumerate(fields.items(), start=2):
+            assignments.append(f"{field_name} = ${index}")
+            values.append(value)
+        values.append(datetime.now(timezone.utc))
+        updated_at_index = len(values)
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                UPDATE customers
+                SET {', '.join(assignments)}, updated_at = ${updated_at_index}
+                WHERE id = $1
+                RETURNING *;
+                """,
+                *values,
             )
             return _record_to_dict(row)
 

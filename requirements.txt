@@ -5,3 +5,4 @@ docxtpl>=0.16,<1
 PyMuPDF>=1.24,<2
 Pillow>=10,<12
 openpyxl>=3.1,<4
+translit-ru>=1.9,<2
