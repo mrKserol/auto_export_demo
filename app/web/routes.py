@@ -82,6 +82,20 @@ async def specification_form_page(request: Request) -> FileResponse:
     )
 
 
+@router.get("/miniapp/estimate")
+async def estimate_form_page(request: Request) -> FileResponse:
+    token = request.query_params.get("token", "")
+    logger.info(
+        "Opening estimate mini app form token_present=%s",
+        bool(token),
+    )
+    # NOTE: estimate.html may be implemented later; for now reuse specification form UI
+    return FileResponse(
+        STATIC_DIR / "specification.html",
+        media_type="text/html; charset=utf-8",
+    )
+
+
 @router.post("/api/specifications")
 async def create_specification_api(
     payload: dict[str, Any],
