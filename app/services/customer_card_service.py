@@ -50,6 +50,14 @@ def build_customer_card_keyboard(
                 ),
             ]
         )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="Удалить спецификацию",
+                    callback_data=f"customer_delete_spec:{customer_id}",
+                ),
+            ]
+        )
     else:
         rows.append(
             [

@@ -7,6 +7,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from app.config import Settings
 from app.database import Database
 from app.handlers.customers import (
     is_admin_for_customer_management,
@@ -24,12 +25,20 @@ from app.services.customer_card_service import (
     customer_has_estimate,
 )
 from app.services.estimate_service import DEFAULT_PRICE_CURRENCY
+from app.services.miniapp_link_service import (
+    build_deep_link_keyboard,
+    build_miniapp_open_keyboard,
+    build_specification_deep_link,
+    build_specification_miniapp_url,
+    create_customer_specification_token,
+)
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
     build_specification_edit_keyboard,
     format_specification_text,
     parse_specification_field_value,
 )
+from app.services.specification_service import create_customer_specification
 from app.services.validation_service import normalize_passport
 from app.states.customer_states import CustomerEditStates
 from app.states.specification_states import SpecificationAddStates, SpecificationEditStates
@@ -107,8 +116,10 @@ async def handle_customer_add_spec(
     callback: CallbackQuery,
     state: FSMContext,
     database: Database,
+    settings: Settings,
+    bot: Bot,
 ) -> None:
-    if callback.message is None:
+    if callback.message is None or callback.from_user is None:
         return
 
     customer_id = int(callback.data.split(":", 1)[1])
@@ -122,13 +133,65 @@ async def handle_customer_add_spec(
         await callback.answer()
         return
 
-    await state.update_data(
+    token = create_customer_specification_token(
+        settings,
         customer_id=customer_id,
-        existing_specification_id=None,
-        specification_fields={},
+        telegram_user_id=callback.from_user.id,
+        origin_chat_id=callback.message.chat.id,
     )
-    await state.set_state(SpecificationAddStates.waiting_brand)
-    await callback.message.answer("Марка")
+    miniapp_url = build_specification_miniapp_url(settings, token)
+
+    if callback.message.chat.type == "private":
+        logger.info(
+            "Sending specification mini app button in private chat "
+            "customer_id=%s telegram_user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
+        await callback.message.answer(
+            "Откройте форму спецификации:",
+            reply_markup=build_miniapp_open_keyboard(miniapp_url),
+        )
+        await callback.answer()
+        return
+
+    me = await bot.get_me()
+    bot_username = me.username or ""
+    launch_code = await database.create_mini_app_launch_code(
+        context_token=token,
+        telegram_user_id=callback.from_user.id,
+        customer_id=customer_id,
+        ttl_seconds=settings.mini_app_token_ttl_seconds,
+    )
+    deep_link = build_specification_deep_link(bot_username, launch_code)
+
+    try:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="Откройте форму спецификации:",
+            reply_markup=build_miniapp_open_keyboard(miniapp_url),
+        )
+        await callback.message.answer(
+            "Форма спецификации отправлена вам в личный чат с ботом."
+        )
+        logger.info(
+            "Sent specification mini app to private chat from group "
+            "customer_id=%s telegram_user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
+    except Exception:
+        logger.info(
+            "Cannot DM user, sending deep-link in group "
+            "customer_id=%s telegram_user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
+        await callback.message.answer(
+            "Чтобы заполнить спецификацию, откройте личный чат с ботом по кнопке ниже.",
+            reply_markup=build_deep_link_keyboard(deep_link),
+        )
+
     await callback.answer()
 
 
@@ -142,6 +205,57 @@ async def handle_customer_edit_spec_public(
         return
     customer_id = int(callback.data.split(":", 1)[1])
     await _open_specification_edit_menu(callback, state, database, customer_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("customer_delete_spec:"))
+async def handle_customer_delete_spec(
+    callback: CallbackQuery,
+    database: Database,
+    bot: Bot,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+
+    # Check admin rights
+    if not await is_admin_for_customer_management(bot, callback.message.chat.id, callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    try:
+        customer_id = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Некорректная команда", show_alert=True)
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        await callback.answer()
+        return
+
+    spec_id = customer.get("specification_id")
+    if not spec_id:
+        await callback.message.answer("У клиента нет спецификации")
+        await callback.answer()
+        return
+
+    # Remove estimates and specification, detach from customer
+    try:
+        await database.delete_estimates_by_specification_id(int(spec_id))
+    except Exception:
+        # log but continue
+        pass
+
+    deleted = await database.delete_specification(int(spec_id))
+    # detach in DB (safe even if FK ON DELETE SET NULL is present)
+    await database.detach_specification_from_customer(customer_id)
+
+    if deleted:
+        updated = await database.get_customer_by_id(customer_id)
+        await callback.message.answer("✅ Спецификация удалена\n\n" + await build_customer_card(updated, database))
+    else:
+        await callback.message.answer("Не удалось удалить спецификацию")
     await callback.answer()
 
 
@@ -525,8 +639,13 @@ async def _finalize_specification(
         await state.clear()
         return
 
-    specification_id = await database.create_specification(specification_fields)
-    customer = await database.attach_specification_to_customer(customer_id, specification_id)
+    result = await create_customer_specification(
+        database,
+        customer_id=int(customer_id),
+        fields=specification_fields,
+        replace_existing=True,
+    )
+    customer = result["customer"]
     await state.clear()
 
     is_admin = False
