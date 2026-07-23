@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
-from app.services.customer_card_service import build_estimate_actions_keyboard
+from app.services.customer_card_service import build_estimate_actions_keyboard, build_estimate_creation_method_keyboard
 from app.services.customer_card_service import (
     build_customer_card,
     build_customer_card_keyboard,
@@ -59,7 +59,46 @@ async def handle_estimate_create_start(
     state: FSMContext,
     database: Database,
 ) -> None:
-    await _start_estimate_flow(callback, state, database, recreate=False)
+    if callback.message is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3 or parts[2] == "":
+        await callback.answer("Некорректная команда сметы", show_alert=True)
+        return
+
+    try:
+        customer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный ID клиента", show_alert=True)
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден.")
+        await callback.answer()
+        return
+
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        await callback.message.answer(
+            "У клиента нет спецификации авто. Сначала добавьте спецификацию."
+        )
+        await callback.answer()
+        return
+
+    existing_estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if existing_estimate:
+        await callback.message.answer("Смета для клиента уже создана. Используйте [Пересоздать смету].")
+        await callback.answer()
+        return
+
+    # Show creation method keyboard (form vs upload)
+    await callback.message.answer(
+        "Выберите способ создания сметы:",
+        reply_markup=build_estimate_creation_method_keyboard(customer_id),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("estimate:recreate:"))

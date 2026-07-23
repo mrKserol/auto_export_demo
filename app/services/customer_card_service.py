@@ -106,6 +106,31 @@ def build_estimate_actions_keyboard(customer_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def build_estimate_creation_method_keyboard(customer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Заполнить форму",
+                    callback_data=f"estimate:form:{customer_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📎 Загрузить смету",
+                    callback_data=f"estimate:upload:{customer_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=f"customer:view:{customer_id}",
+                )
+            ],
+        ]
+    )
+
+
 async def customer_has_estimate(customer: dict, database: Database) -> bool:
     specification_id = customer.get("specification_id")
     if not specification_id:
