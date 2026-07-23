@@ -9,6 +9,11 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.database import Database
 from app.services.customer_card_service import build_estimate_actions_keyboard
+from app.services.customer_card_service import (
+    build_customer_card,
+    build_customer_card_keyboard,
+    customer_has_estimate,
+)
 from app.services.estimate_excel_generation_service import (
     EstimateExcelTemplateNotFoundError,
     generate_estimate_excel,
@@ -329,6 +334,52 @@ async def handle_estimate_file(callback: CallbackQuery, database: Database) -> N
     if sent:
         await callback.message.answer("Готово. Смета сформирована.")
     await callback.answer("Не удалось отправить смету." if not sent else None)
+
+
+@router.callback_query(F.data.startswith("estimate:delete:"))
+async def handle_estimate_delete(callback: CallbackQuery, database: Database, bot: Bot) -> None:
+    if callback.message is None:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректная команда", show_alert=True)
+        return
+
+    try:
+        customer_id = int(parts[2])
+    except ValueError:
+        await callback.answer("Некорректный ID клиента", show_alert=True)
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer or not customer.get("specification_id"):
+        await callback.message.answer("У клиента нет спецификации авто.")
+        await callback.answer()
+        return
+
+    specification_id = int(customer["specification_id"])
+    estimate = await database.get_estimate_by_specification_id(specification_id)
+    if not estimate:
+        await callback.message.answer(ESTIMATE_REQUIRED_REPLY)
+        await callback.answer()
+        return
+
+    # delete estimates linked to this specification
+    try:
+        await database.delete_estimates_by_specification_id(specification_id)
+    except Exception:
+        logger.exception("Failed to delete estimates for specification_id=%s", specification_id)
+        await callback.message.answer("Не удалось удалить смету.")
+        await callback.answer()
+        return
+
+    # send updated customer card
+    updated_customer = await database.get_customer_by_id(customer_id)
+    has_est = await customer_has_estimate(updated_customer, database)
+    await callback.message.answer("✅ Смета удалена\n\n" + await build_customer_card(updated_customer, database),
+                                  reply_markup=build_customer_card_keyboard(updated_customer, is_admin=False, has_estimate=has_est))
+    await callback.answer()
 
 
 async def _send_estimate_excel(

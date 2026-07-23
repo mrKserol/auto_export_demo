@@ -31,6 +31,10 @@ def build_customer_card_keyboard(
                         text="Смета",
                         callback_data=f"estimate:file:{customer_id}",
                     ),
+                    InlineKeyboardButton(
+                        text="Удалить смету",
+                        callback_data=f"estimate:delete:{customer_id}",
+                    ),
                 ]
             )
         else:
