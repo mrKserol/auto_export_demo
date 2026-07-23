@@ -152,3 +152,52 @@ class SpecificationFormIn(BaseModel):
             "mileage": str(self.mileage),
             "price": price,
         }
+
+
+class EstimateFormIn(BaseModel):
+    engine_power: Decimal
+    exchange_rate: Decimal
+    inspect_transport_price: Decimal
+    bank_commission: Decimal
+    transit_declaration_price: Decimal
+    insurance_shipment: Decimal
+    custom_clearing: Decimal
+    contractor_comission: Decimal
+    context_token: str
+    telegram_init_data: str
+
+    @field_validator(
+        "context_token",
+        "telegram_init_data",
+        mode="before",
+    )
+    @classmethod
+    def strip_strings(cls, v):
+        return (v or "").strip()
+
+    @field_validator("engine_power")
+    def check_engine_power(cls, v: Decimal):
+        if v <= 0 or v > Decimal("5000"):
+            raise ValueError("Недопустимая мощность")
+        return v
+
+    @field_validator("exchange_rate")
+    def check_exchange_rate(cls, v: Decimal):
+        if v <= 0:
+            raise ValueError("Недопустимый курс")
+        return v
+
+    @field_validator(
+        "inspect_transport_price",
+        "bank_commission",
+        "transit_declaration_price",
+        "insurance_shipment",
+        "custom_clearing",
+        "contractor_comission",
+    )
+    def check_non_negative(cls, v: Decimal):
+        if v is None:
+            raise ValueError("Обязательное поле")
+        if v < 0:
+            raise ValueError("Значение должно быть неотрицательным")
+        return v

@@ -11,6 +11,7 @@ from typing import Any
 
 
 PURPOSE_CREATE_SPECIFICATION = "create_specification"
+PURPOSE_CREATE_ESTIMATE = "create_estimate"
 
 
 class TokenError(Exception):
@@ -55,6 +56,30 @@ def create_specification_context_token(
     current_time = int(time.time() if now is None else now)
     payload = SpecificationContextToken(
         purpose=PURPOSE_CREATE_SPECIFICATION,
+        customer_id=int(customer_id),
+        telegram_user_id=int(telegram_user_id),
+        origin_chat_id=int(origin_chat_id),
+        exp=current_time + int(ttl_seconds),
+        nonce=secrets.token_urlsafe(16),
+    )
+    return _sign_payload(payload.to_payload(), secret)
+
+
+def create_estimate_context_token(
+    *,
+    secret: str,
+    customer_id: int,
+    telegram_user_id: int,
+    origin_chat_id: int,
+    ttl_seconds: int,
+    now: int | None = None,
+) -> str:
+    if ttl_seconds <= 0:
+        raise ValueError("ttl_seconds must be positive")
+
+    current_time = int(time.time() if now is None else now)
+    payload = SpecificationContextToken(
+        purpose=PURPOSE_CREATE_ESTIMATE,
         customer_id=int(customer_id),
         telegram_user_id=int(telegram_user_id),
         origin_chat_id=int(origin_chat_id),
@@ -120,6 +145,20 @@ def verify_specification_context_token(
         raise TokenError("USER_MISMATCH", "Токен принадлежит другому пользователю")
 
     return context
+
+
+def verify_estimate_context_token(
+    token: str,
+    *,
+    secret: str,
+    expected_telegram_user_id: int | None = None,
+    now: int | None = None,
+) -> SpecificationContextToken:
+    # reuse verify flow but check purpose
+    ctx = verify_specification_context_token(token, secret=secret, expected_telegram_user_id=expected_telegram_user_id, now=now)
+    if ctx.purpose != PURPOSE_CREATE_ESTIMATE:
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Неверное назначение токена")
+    return ctx
 
 
 def _sign_payload(payload: dict[str, Any], secret: str) -> str:

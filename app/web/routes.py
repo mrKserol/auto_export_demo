@@ -25,7 +25,8 @@ from app.services.specification_service import (
 )
 from app.web.auth import InitDataError, validate_telegram_init_data
 from app.web.schemas import SpecificationFormIn
-from app.web.token_service import TokenError, verify_specification_context_token
+from app.web.schemas import EstimateFormIn
+from app.web.token_service import TokenError, verify_specification_context_token, verify_estimate_context_token
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,76 @@ async def create_specification_api(
             "message": "Спецификация сохранена",
         },
     )
+
+
+@router.post("/api/estimates")
+async def create_estimate_api(
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+    bot: Bot = Depends(get_bot),
+) -> JSONResponse:
+    try:
+        form = EstimateFormIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors: dict[str, str] = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(422, "VALIDATION_ERROR", "Проверьте заполнение формы", extra={"fields": field_errors})
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        context = verify_estimate_context_token(form.context_token, secret=settings.mini_app_token_secret, expected_telegram_user_id=telegram_user.id)
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    # check customer and specification
+    customer = await database.get_customer_by_id(int(context.customer_id))
+    if not customer:
+        return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        return error_response(404, "SPECIFICATION_NOT_FOUND", "У клиента нет спецификации")
+    existing_estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if existing_estimate and not getattr(context, "recreate", False):
+        return error_response(409, "ESTIMATE_ALREADY_EXISTS", "Смета для клиента уже создана")
+
+    try:
+        result = await create_estimate(
+            database,
+            customer_id=int(context.customer_id),
+            specification_id=int(specification_id),
+            specification=await database.get_specification_by_id(int(specification_id)),
+            engine_power=form.engine_power,
+            exchange_rate=form.exchange_rate,
+            inspect_transport_price=form.inspect_transport_price,
+            bank_commission=form.bank_commission,
+            transit_declaration_price=form.transit_declaration_price,
+            insurance_shipment=form.insurance_shipment,
+            custom_clearing=form.custom_clearing,
+            contractor_comission=form.contractor_comission,
+        )
+    except Exception:
+        return error_response(500, "ESTIMATE_SAVE_ERROR", "Не удалось сохранить смету")
+
+    # notify user
+    try:
+        await bot.send_message(chat_id=telegram_user.id, text=format_estimate_summary(result, await database.get_specification_by_id(int(specification_id))))
+        has_est = await customer_has_estimate(customer, database)
+        await bot.send_message(chat_id=telegram_user.id, text=await build_customer_card(customer, database), reply_markup=build_customer_card_keyboard(customer, is_admin=False, has_estimate=has_est))
+    except Exception:
+        pass
+
+    return JSONResponse(status_code=200, content={"ok": True, "estimate_id": result.get("id"), "customer_id": context.customer_id, "message": "Смета сохранена"})
 
 
 def format_specification_summary(specification: dict) -> str:

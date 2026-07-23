@@ -1,0 +1,31 @@
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --text: var(--tg-theme-text-color, #111111);
+  --hint: var(--tg-theme-hint-color, #888888);
+  --link: var(--tg-theme-link-color, #2481cc);
+  --button: var(--tg-theme-button-color, #2481cc);
+  --button-text: var(--tg-theme-button-text-color, #ffffff);
+  --secondary: var(--tg-theme-secondary-bg-color, #f1f1f1);
+  --danger: #d94040;
+  --success: #1f8f4e;
+  --radius: 14px;
+  --gap: 14px;
+}
+* { box-sizing: border-box; }
+body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); }
+.page { max-width:640px; margin:0 auto; padding:20px 16px 120px; }
+.header h1 { margin:0 0 8px; font-size:1.45rem; }
+.subtitle { margin:0 0 18px; color:var(--hint); }
+.field { display:flex; flex-direction:column; gap:6px; margin-bottom:var(--gap); }
+.field span { font-weight:600; font-size:0.92rem; }
+.field input, .field select { width:100%; border:1px solid transparent; border-radius:var(--radius); background:var(--secondary); color:var(--text); padding:12px 14px; font-size:1rem; }
+.field input:focus { outline:2px solid var(--link); outline-offset:1px; }
+.field-error { min-height:1em; color:var(--danger); font-size:0.82rem; }
+.price-row { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; }
+.currency { display:inline-flex; align-items:center; justify-content:center; min-width:58px; padding:12px 10px; border-radius:var(--radius); background:var(--secondary); font-weight:700; }
+.alert { border-radius:var(--radius); padding:12px 14px; margin-bottom:16px; font-size:0.95rem; }
+.alert-error { background: rgba(217,64,64,0.12); color:var(--danger); }
+.alert-success { background: rgba(31,143,78,0.12); color:var(--success); }
+.fallback-submit { width:100%; margin-top:8px; border:0; border-radius:var(--radius); padding:14px 16px; background:var(--button); color:var(--button-text); font-size:1rem; font-weight:700; }
+.fallback-submit[disabled]{ opacity:0.6; }
+.field.has-error input { outline:1px solid var(--danger); }
