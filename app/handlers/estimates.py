@@ -5,7 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Bot
 
 from app.database import Database
 from app.services.customer_card_service import build_estimate_actions_keyboard, build_estimate_creation_method_keyboard
@@ -100,6 +100,106 @@ async def handle_estimate_create_start(
     )
     await callback.answer()
 
+
+@router.callback_query(F.data.startswith("estimate:form:"))
+async def handle_estimate_form(callback: CallbackQuery, database: Database, bot: Bot) -> None:
+    await callback.answer()
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        parts = callback.data.split(":")
+        customer_id = int(parts[2])
+    except Exception:
+        await callback.message.answer("Некорректная команда")
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден.")
+        return
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        await callback.message.answer("У клиента нет спецификации авто. Сначала добавьте спецификацию.")
+        return
+    existing_estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if existing_estimate:
+        await callback.message.answer("Смета для клиента уже создана. Используйте [Пересоздать смету].")
+        return
+
+    # create token and URL (reuse specification token creation for now)
+    from app.config import load_settings
+    from app.services.miniapp_link_service import create_customer_specification_token, build_specification_miniapp_url
+
+    settings = load_settings()
+    token = create_customer_specification_token(
+        settings,
+        customer_id=customer_id,
+        telegram_user_id=callback.from_user.id,
+        origin_chat_id=callback.message.chat.id,
+    )
+    url = build_specification_miniapp_url(settings, token).replace("/specification", "/estimate")
+    logger.info("Estimate form callback customer_id=%s telegram_user_id=%s", customer_id, callback.from_user.id)
+    if callback.message.chat.type == "private":
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]])
+        await callback.message.answer("Откройте форму сметы:", reply_markup=kb)
+    else:
+        me = await bot.get_me()
+        bot_username = me.username or ""
+        launch_code = await database.create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=600)
+        deep_link = f"https://t.me/{bot_username}?start=est_{launch_code}"
+        try:
+            await bot.send_message(chat_id=callback.from_user.id, text="Откройте форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=deep_link)]]))
+            await callback.message.answer("Форма сметы отправлена вам в личный чат с ботом.")
+        except Exception:
+            await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+
+
+@router.callback_query(F.data.startswith("estimate:upload:"))
+async def handle_estimate_upload_start(callback: CallbackQuery, state: FSMContext, database: Database) -> None:
+    await callback.answer()
+    if callback.message is None or callback.from_user is None:
+        return
+    try:
+        parts = callback.data.split(":")
+        customer_id = int(parts[2])
+    except Exception:
+        await callback.message.answer("Некорректная команда")
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден.")
+        return
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        await callback.message.answer("У клиента нет спецификации авто. Сначала добавьте спецификацию.")
+        return
+    existing_estimate = await database.get_estimate_by_specification_id(int(specification_id))
+    if existing_estimate:
+        await callback.message.answer("Смета для клиента уже создана. Используйте [Пересоздать смету].")
+        return
+
+    await state.clear()
+    await state.update_data(customer_id=customer_id, specification_id=int(specification_id), telegram_user_id=callback.from_user.id, origin_chat_id=callback.message.chat.id)
+    from app.states.estimate_states import EstimateUploadStates
+    await state.set_state(EstimateUploadStates.waiting_file)
+    await callback.message.answer("Отправьте фото или PDF готовой сметы. Поддерживаются PNG, JPG, JPEG и PDF. Максимум 15 МБ. PDF до 5 страниц.")
+
+
+@router.callback_query(F.data.startswith("estimate:cancel:"))
+async def handle_estimate_creation_cancel(callback: CallbackQuery, state: FSMContext, database: Database) -> None:
+    await callback.answer()
+    if callback.message is None:
+        return
+    try:
+        parts = callback.data.split(":")
+        customer_id = int(parts[2])
+    except Exception:
+        await callback.message.answer("Отклонено")
+        await state.clear()
+        return
+    await state.clear()
+    await callback.message.answer("Создание сметы отменено.")
 
 @router.callback_query(F.data.startswith("estimate:recreate:"))
 async def handle_estimate_recreate_start(

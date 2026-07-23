@@ -9,3 +9,8 @@ class EstimateStates(StatesGroup):
     waiting_insurance_shipment = State()
     waiting_custom_clearing = State()
     waiting_contractor_comission = State()
+
+
+class EstimateUploadStates(StatesGroup):
+    waiting_file = State()
+    processing = State()
