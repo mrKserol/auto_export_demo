@@ -29,3 +29,8 @@ class CustomerEditStates(StatesGroup):
     choosing_action = State()
     choosing_field = State()
     waiting_new_value = State()
+
+
+class CustomerDeleteStates(StatesGroup):
+    waiting_passport = State()
+    waiting_confirmation = State()
