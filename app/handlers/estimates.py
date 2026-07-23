@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, Message, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, Bot
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+)
 
 from app.database import Database
 from app.services.customer_card_service import build_estimate_actions_keyboard, build_estimate_creation_method_keyboard
