@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import aiohttp
-import fitz
+try:
+    import fitz  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - environment-dependent dependency
+    fitz = None  # type: ignore[assignment]
 from PIL import Image
 
 try:
@@ -360,6 +363,8 @@ def _image_to_jpeg_bytes(image: Image.Image) -> tuple[bytes, str]:
 
 
 def _render_pdf_pages(file_content: bytes) -> list[bytes]:
+    if fitz is None:
+        raise RuntimeError("PDF OCR requires PyMuPDF (fitz) dependency")
     document = fitz.open(stream=file_content, filetype="pdf")
     pages: list[bytes] = []
     try:

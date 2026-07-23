@@ -8,7 +8,10 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from docxtpl import DocxTemplate
+try:
+    from docxtpl import DocxTemplate  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - environment-dependent dependency
+    DocxTemplate = None  # type: ignore[assignment]
 
 from app.database import Database
 from app.services.customer_card_service import format_customer_fio
@@ -275,6 +278,8 @@ def _build_output_path(customer: dict, specification: dict) -> Path:
 
 
 def _render_docx(context: dict, output_path: Path) -> None:
+    if DocxTemplate is None:
+        raise RuntimeError("DOCX generation requires 'docxtpl' dependency")
     doc = DocxTemplate(str(TEMPLATE_PATH))
     doc.render(context)
     doc.save(str(output_path))

@@ -124,7 +124,7 @@ def build_estimate_creation_method_keyboard(customer_id: int) -> InlineKeyboardM
             [
                 InlineKeyboardButton(
                     text="Отмена",
-                    callback_data=f"customer:view:{customer_id}",
+                    callback_data=f"estimate:cancel:{customer_id}",
                 )
             ],
         ]

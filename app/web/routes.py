@@ -23,6 +23,7 @@ from app.services.specification_service import (
     SpecificationServiceError,
     create_customer_specification,
 )
+from app.services.estimate_service import create_estimate, format_estimate_summary
 from app.web.auth import InitDataError, validate_telegram_init_data
 from app.web.schemas import SpecificationFormIn
 from app.web.schemas import EstimateFormIn
@@ -90,9 +91,8 @@ async def estimate_form_page(request: Request) -> FileResponse:
         "Opening estimate mini app form token_present=%s",
         bool(token),
     )
-    # NOTE: estimate.html may be implemented later; for now reuse specification form UI
     return FileResponse(
-        STATIC_DIR / "specification.html",
+        STATIC_DIR / "estimate.html",
         media_type="text/html; charset=utf-8",
     )
 

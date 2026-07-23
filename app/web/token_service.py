@@ -96,6 +96,39 @@ def verify_specification_context_token(
     expected_telegram_user_id: int | None = None,
     now: int | None = None,
 ) -> SpecificationContextToken:
+    return _verify_context_token(
+        token,
+        secret=secret,
+        expected_telegram_user_id=expected_telegram_user_id,
+        now=now,
+        expected_purpose=PURPOSE_CREATE_SPECIFICATION,
+    )
+
+
+def verify_estimate_context_token(
+    token: str,
+    *,
+    secret: str,
+    expected_telegram_user_id: int | None = None,
+    now: int | None = None,
+) -> SpecificationContextToken:
+    return _verify_context_token(
+        token,
+        secret=secret,
+        expected_telegram_user_id=expected_telegram_user_id,
+        now=now,
+        expected_purpose=PURPOSE_CREATE_ESTIMATE,
+    )
+
+
+def _verify_context_token(
+    token: str,
+    *,
+    secret: str,
+    expected_telegram_user_id: int | None,
+    now: int | None,
+    expected_purpose: str,
+) -> SpecificationContextToken:
     if not token or "." not in token:
         raise TokenError("INVALID_CONTEXT_TOKEN", "Контекстный токен повреждён")
 
@@ -119,7 +152,7 @@ def verify_specification_context_token(
         raise TokenError("INVALID_CONTEXT_TOKEN", "Контекстный токен повреждён")
 
     purpose = payload.get("purpose")
-    if purpose != PURPOSE_CREATE_SPECIFICATION:
+    if purpose != expected_purpose:
         raise TokenError("INVALID_CONTEXT_TOKEN", "Неверное назначение токена")
 
     try:
@@ -145,20 +178,6 @@ def verify_specification_context_token(
         raise TokenError("USER_MISMATCH", "Токен принадлежит другому пользователю")
 
     return context
-
-
-def verify_estimate_context_token(
-    token: str,
-    *,
-    secret: str,
-    expected_telegram_user_id: int | None = None,
-    now: int | None = None,
-) -> SpecificationContextToken:
-    # reuse verify flow but check purpose
-    ctx = verify_specification_context_token(token, secret=secret, expected_telegram_user_id=expected_telegram_user_id, now=now)
-    if ctx.purpose != PURPOSE_CREATE_ESTIMATE:
-        raise TokenError("INVALID_CONTEXT_TOKEN", "Неверное назначение токена")
-    return ctx
 
 
 def _sign_payload(payload: dict[str, Any], secret: str) -> str:

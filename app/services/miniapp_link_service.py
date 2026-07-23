@@ -3,7 +3,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from app.config import Settings
-from app.web.token_service import create_specification_context_token
+from app.web.token_service import create_estimate_context_token, create_specification_context_token
 
 
 def build_specification_miniapp_url(settings: Settings, token: str) -> str:
@@ -21,7 +21,7 @@ def create_customer_estimate_token(
     telegram_user_id: int,
     origin_chat_id: int,
 ) -> str:
-    return create_specification_context_token(
+    return create_estimate_context_token(
         secret=settings.mini_app_token_secret,
         customer_id=customer_id,
         telegram_user_id=telegram_user_id,

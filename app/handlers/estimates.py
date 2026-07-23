@@ -133,18 +133,21 @@ async def handle_estimate_form(callback: CallbackQuery, database: Database, bot:
         await callback.message.answer("Смета для клиента уже создана. Используйте [Пересоздать смету].")
         return
 
-    # create token and URL (reuse specification token creation for now)
+    # Create signed context token for estimate Mini App (purpose=create_estimate)
     from app.config import load_settings
-    from app.services.miniapp_link_service import create_customer_specification_token, build_specification_miniapp_url
+    from app.services.miniapp_link_service import (
+        build_estimate_miniapp_url,
+        create_customer_estimate_token,
+    )
 
     settings = load_settings()
-    token = create_customer_specification_token(
+    token = create_customer_estimate_token(
         settings,
         customer_id=customer_id,
         telegram_user_id=callback.from_user.id,
         origin_chat_id=callback.message.chat.id,
     )
-    url = build_specification_miniapp_url(settings, token).replace("/specification", "/estimate")
+    url = build_estimate_miniapp_url(settings, token)
     logger.info("Estimate form callback customer_id=%s telegram_user_id=%s", customer_id, callback.from_user.id)
     if callback.message.chat.type == "private":
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]])
@@ -194,9 +197,14 @@ async def handle_estimate_upload_start(callback: CallbackQuery, state: FSMContex
 
 
 @router.callback_query(F.data.startswith("estimate:cancel:"))
-async def handle_estimate_creation_cancel(callback: CallbackQuery, state: FSMContext, database: Database) -> None:
+async def handle_estimate_creation_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+    bot: Bot,
+) -> None:
     await callback.answer()
-    if callback.message is None:
+    if callback.message is None or callback.from_user is None:
         return
     try:
         parts = callback.data.split(":")
@@ -206,7 +214,20 @@ async def handle_estimate_creation_cancel(callback: CallbackQuery, state: FSMCon
         await state.clear()
         return
     await state.clear()
-    await callback.message.answer("Создание сметы отменено.")
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден.")
+        return
+
+    has_est = await customer_has_estimate(customer, database)
+    await callback.message.answer(
+        "Создание сметы отменено.\n\n" + await build_customer_card(customer, database),
+        reply_markup=build_customer_card_keyboard(
+            customer,
+            is_admin=False,
+            has_estimate=has_est,
+        ),
+    )
 
 @router.callback_query(F.data.startswith("estimate:recreate:"))
 async def handle_estimate_recreate_start(
