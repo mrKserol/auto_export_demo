@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -23,6 +23,7 @@ class Settings:
     customer_upload_max_file_bytes: int = 20 * 1024 * 1024
     telegram_bot_username: str | None = None
     miniapp_test_mode: bool = False
+    miniapp_allowed_telegram_user_ids: frozenset[int] = field(default_factory=frozenset)
     app_commit_sha: str | None = None
 
 
@@ -59,6 +60,32 @@ def _parse_int_env(name: str, default: int) -> int:
     if value is None:
         return default
     return int(value)
+
+
+def parse_miniapp_allowed_telegram_user_ids(raw: str | None) -> frozenset[int]:
+    """Parse comma-separated Telegram user IDs. Empty → empty set (deny all)."""
+    if raw is None or not str(raw).strip():
+        return frozenset()
+
+    allowed: set[int] = set()
+    for part in str(raw).split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            user_id = int(token)
+        except ValueError as error:
+            raise RuntimeError(
+                "Environment variable MINIAPP_ALLOWED_TELEGRAM_USER_IDS "
+                f"contains invalid telegram user id: {token!r}"
+            ) from error
+        if user_id <= 0:
+            raise RuntimeError(
+                "Environment variable MINIAPP_ALLOWED_TELEGRAM_USER_IDS "
+                f"contains invalid telegram user id: {token!r}"
+            )
+        allowed.add(user_id)
+    return frozenset(allowed)
 
 
 def _normalize_base_url(value: str) -> str:
@@ -123,5 +150,8 @@ def load_settings() -> Settings:
             (os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@") or None
         ),
         miniapp_test_mode=_parse_bool_env("MINIAPP_TEST_MODE", default=False),
+        miniapp_allowed_telegram_user_ids=parse_miniapp_allowed_telegram_user_ids(
+            os.getenv("MINIAPP_ALLOWED_TELEGRAM_USER_IDS")
+        ),
         app_commit_sha=resolve_app_commit_sha(),
     )

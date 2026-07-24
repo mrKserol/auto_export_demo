@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 
-from app.config import Settings
+from app.config import Settings, parse_miniapp_allowed_telegram_user_ids
 from app.database import Database
 from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
@@ -36,6 +36,7 @@ SECRET = "mini-app-secret"
 NOW = int(time.time())
 USER_ID = 4242
 OTHER_USER = 9999
+DENIED_USER = 7777
 
 
 def _settings(**overrides) -> Settings:
@@ -58,6 +59,8 @@ def _settings(**overrides) -> Settings:
         "telegram_init_data_max_age_seconds": 900,
         "customer_upload_max_file_bytes": 2048,
         "telegram_bot_username": "demo_bot",
+        "miniapp_test_mode": False,
+        "miniapp_allowed_telegram_user_ids": frozenset({USER_ID}),
     }
     values.update(overrides)
     return Settings(**values)
@@ -150,8 +153,11 @@ class MiniAppApiIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database(self.database_url)
         await self.db.connect()
         self.repo = CustomerUploadBatchRepository(self.db.pool)
-        self.settings = _settings(database_url=self.database_url)
         self.user_id = 400000 + (uuid.uuid4().int % 100000)
+        self.settings = _settings(
+            database_url=self.database_url,
+            miniapp_allowed_telegram_user_ids=frozenset({self.user_id, OTHER_USER}),
+        )
         recognition = AsyncMock()
         recognition.process_batch = AsyncMock()
         recognition.repository = self.repo
@@ -459,7 +465,10 @@ class MiniAppApiIntegrationTests(unittest.IsolatedAsyncioTestCase):
         expired = await self.client.post(
             "/api/miniapp/bootstrap",
             json={
-                "telegram_init_data": _init_data(auth_date=NOW - 10_000),
+                "telegram_init_data": _init_data(
+                    user_id=self.user_id,
+                    auth_date=NOW - 10_000,
+                ),
             },
         )
         self.assertEqual(expired.status_code, 401)
@@ -479,6 +488,253 @@ class MiniAppApiIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(response.status_code, 401)
+
+
+@unittest.skipUnless(
+    resolve_test_database_url() is not None,
+    "Need TEST_DATABASE_URL or local postgres + testing.postgresql",
+)
+class MiniAppAclTests(unittest.IsolatedAsyncioTestCase):
+    _pg = None
+    database_url: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        resolved = resolve_test_database_url()
+        if resolved is None:
+            raise unittest.SkipTest("PostgreSQL test backend unavailable")
+        if resolved == "__testing_postgresql__":
+            import testing.postgresql
+
+            ensure_postgres_on_path()
+            cls._pg = testing.postgresql.Postgresql()
+            cls.database_url = cls._pg.url()
+        else:
+            cls.database_url = resolved
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._pg is not None:
+            cls._pg.stop()
+            cls._pg = None
+
+    async def asyncSetUp(self) -> None:
+        self.db = Database(self.database_url)
+        await self.db.connect()
+        self.allowed_user = 510000 + (uuid.uuid4().int % 10000)
+        self.denied_user = DENIED_USER
+        self.settings = _settings(
+            database_url=self.database_url,
+            miniapp_allowed_telegram_user_ids=frozenset({self.allowed_user}),
+            miniapp_test_mode=False,
+        )
+        recognition = AsyncMock()
+        recognition.process_batch = AsyncMock()
+        recognition.repository = CustomerUploadBatchRepository(self.db.pool)
+        folder = AsyncMock()
+        folder.ensure_batch_files_saved = AsyncMock()
+        folder.repository = recognition.repository
+        self.app = create_fastapi_app(
+            settings=self.settings,
+            database=self.db,
+            bot=MagicMock(),
+            customer_batch_recognition_service=recognition,
+            customer_folder_service=folder,
+        )
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app),
+            base_url="http://test",
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.client.aclose()
+        await self.db.close()
+
+    def _init(self, user_id: int) -> str:
+        return _init_data(user_id=user_id)
+
+    async def test_allowlisted_user_opens_bootstrap(self) -> None:
+        response = await self.client.post(
+            "/api/miniapp/bootstrap",
+            json={"telegram_init_data": self._init(self.allowed_user)},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"])
+
+    async def test_user_outside_allowlist_gets_403(self) -> None:
+        response = await self.client.post(
+            "/api/miniapp/bootstrap",
+            json={"telegram_init_data": self._init(self.denied_user)},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "MINIAPP_FORBIDDEN")
+
+    async def test_valid_init_data_without_allowlist_is_not_enough(self) -> None:
+        response = await self.client.post(
+            "/api/customers/search",
+            json={
+                "telegram_init_data": self._init(self.denied_user),
+                "passport": "8011541410",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_empty_allowlist_in_production_denies_access(self) -> None:
+        locked = create_fastapi_app(
+            settings=_settings(
+                database_url=self.database_url,
+                miniapp_allowed_telegram_user_ids=frozenset(),
+                miniapp_test_mode=False,
+            ),
+            database=self.db,
+            bot=MagicMock(),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=locked),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/miniapp/bootstrap",
+                json={"telegram_init_data": self._init(self.allowed_user)},
+            )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_test_mode_does_not_bypass_empty_allowlist(self) -> None:
+        locked = create_fastapi_app(
+            settings=_settings(
+                database_url=self.database_url,
+                miniapp_allowed_telegram_user_ids=frozenset(),
+                miniapp_test_mode=True,
+            ),
+            database=self.db,
+            bot=MagicMock(),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=locked),
+            base_url="http://test",
+        ) as client:
+            response = await client.post(
+                "/api/miniapp/bootstrap",
+                json={"telegram_init_data": self._init(self.allowed_user)},
+            )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_allowlisted_user_can_search_customer(self) -> None:
+        digits = f"80{uuid.uuid4().int % 10**8:08d}"
+        passport = normalize_passport(digits)
+        await self.db.create_customer(
+            {
+                "passport": passport,
+                "last_name": "Сидоров",
+                "first_name": "Сидор",
+            }
+        )
+        response = await self.client.post(
+            "/api/customers/search",
+            json={
+                "telegram_init_data": self._init(self.allowed_user),
+                "passport": digits,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "found")
+
+    async def test_denied_user_cannot_search_customer(self) -> None:
+        response = await self.client.post(
+            "/api/customers/search",
+            json={
+                "telegram_init_data": self._init(self.denied_user),
+                "passport": "8011541410",
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_denied_user_cannot_open_customer_card(self) -> None:
+        customer = await self.db.create_customer(
+            {
+                "passport": f"80 33 {uuid.uuid4().int % 10**6:06d}",
+                "last_name": "Тестов",
+                "first_name": "Тест",
+            }
+        )
+        response = await self.client.post(
+            "/api/miniapp/customer-card",
+            json={
+                "telegram_init_data": self._init(self.denied_user),
+                "customer_id": customer["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_denied_user_cannot_get_edit_token(self) -> None:
+        customer = await self.db.create_customer(
+            {
+                "passport": f"80 44 {uuid.uuid4().int % 10**6:06d}",
+                "last_name": "Тестов",
+                "first_name": "Тест",
+            }
+        )
+        response = await self.client.post(
+            "/api/miniapp/customer-edit-token",
+            json={
+                "telegram_init_data": self._init(self.denied_user),
+                "customer_id": customer["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_denied_user_cannot_get_specification_token(self) -> None:
+        customer = await self.db.create_customer(
+            {
+                "passport": f"80 55 {uuid.uuid4().int % 10**6:06d}",
+                "last_name": "Тестов",
+                "first_name": "Тест",
+            }
+        )
+        response = await self.client.post(
+            "/api/miniapp/specification-token",
+            json={
+                "telegram_init_data": self._init(self.denied_user),
+                "customer_id": customer["id"],
+            },
+        )
+        self.assertEqual(response.status_code, 403)
+
+    async def test_denied_user_cannot_create_batch(self) -> None:
+        response = await self.client.post(
+            "/api/customer-batches",
+            json={"telegram_init_data": self._init(self.denied_user)},
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+class MiniAppAclUnitTests(unittest.TestCase):
+    def test_test_mode_defaults_false_and_does_not_auto_enable(self) -> None:
+        settings = _settings(miniapp_allowed_telegram_user_ids=frozenset())
+        self.assertFalse(settings.miniapp_test_mode)
+
+    def test_parse_allowlist_ignores_spaces_and_rejects_invalid(self) -> None:
+        parsed = parse_miniapp_allowed_telegram_user_ids(" 316257868, 123456789 ,987654321 ")
+        self.assertEqual(parsed, frozenset({316257868, 123456789, 987654321}))
+        self.assertEqual(parse_miniapp_allowed_telegram_user_ids(""), frozenset())
+        self.assertEqual(parse_miniapp_allowed_telegram_user_ids(None), frozenset())
+        with self.assertRaises(RuntimeError):
+            parse_miniapp_allowed_telegram_user_ids("1,abc,2")
+
+    def test_add_customer_command_unaffected_by_empty_allowlist(self) -> None:
+        from aiogram.filters import Command
+
+        from app.handlers.customer_batch_upload import router as batch_router
+
+        settings = _settings(miniapp_allowed_telegram_user_ids=frozenset())
+        self.assertEqual(settings.miniapp_allowed_telegram_user_ids, frozenset())
+        batch_commands: list[set[str]] = []
+        for observer in batch_router.message.handlers:
+            for filter_obj in observer.filters or []:
+                callback = getattr(filter_obj, "callback", None)
+                if isinstance(callback, Command):
+                    batch_commands.append(set(callback.commands))
+        self.assertTrue(any("add_customer" in commands for commands in batch_commands))
 
 
 class MiniAppUnitHelpersTests(unittest.TestCase):

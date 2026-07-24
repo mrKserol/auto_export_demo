@@ -68,8 +68,26 @@ async def run_application(settings: Settings) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logger = logging.getLogger(__name__)
     # Log application commit SHA for diagnostics
-    logging.getLogger(__name__).info("Application commit SHA: %s", settings.app_commit_sha or "unknown")
+    logger.info("Application commit SHA: %s", settings.app_commit_sha or "unknown")
+    if not settings.miniapp_allowed_telegram_user_ids:
+        if settings.miniapp_test_mode:
+            logger.warning(
+                "MINIAPP_ALLOWED_TELEGRAM_USER_IDS is empty; "
+                "Mini App APIs deny all users "
+                "(MINIAPP_TEST_MODE does not bypass the allowlist)"
+            )
+        else:
+            logger.error(
+                "MINIAPP_ALLOWED_TELEGRAM_USER_IDS is empty; "
+                "Mini App employee APIs are locked"
+            )
+    else:
+        logger.info(
+            "Mini App employee allowlist configured (%s user ids)",
+            len(settings.miniapp_allowed_telegram_user_ids),
+        )
 
     bot = create_bot(settings)
     dispatcher = create_dispatcher()
@@ -158,7 +176,7 @@ async def run_application(settings: Settings) -> None:
                 continue
             exception = task.exception()
             if exception is not None:
-                logging.getLogger(__name__).error(
+                logger.error(
                     "Background task failed: %s",
                     exception,
                     exc_info=exception,

@@ -96,18 +96,38 @@ class BatchLaunchPayload(InitDataPayload):
     batch_id: int
 
 
+def require_miniapp_employee(
+    settings: Settings,
+    user: TelegramUser,
+) -> TelegramUser | JSONResponse:
+    """Any allowlisted employee may work with any Arthur AutoExport customer.
+
+    Empty allowlist always denies access. MINIAPP_TEST_MODE does not bypass
+    the allowlist (tests must configure explicit user IDs).
+    """
+    if user.id not in settings.miniapp_allowed_telegram_user_ids:
+        return error_response(
+            403,
+            "MINIAPP_FORBIDDEN",
+            "Нет доступа к Mini App. Обратитесь к администратору.",
+        )
+    return user
+
+
 def _authenticate(
     settings: Settings,
     init_data: str,
 ) -> TelegramUser | JSONResponse:
+    """Validate Telegram initData, then enforce employee allowlist."""
     try:
-        return validate_telegram_init_data(
+        user = validate_telegram_init_data(
             init_data,
             settings.telegram_bot_token,
             settings.telegram_init_data_max_age_seconds,
         )
     except InitDataError as error:
         return error_response(401, error.code, error.message)
+    return require_miniapp_employee(settings, user)
 
 
 def _rate_limit(action: str, user_id: int, *, limit: int, window: float) -> JSONResponse | None:
