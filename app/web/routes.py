@@ -31,6 +31,14 @@ from app.web.schemas import EstimateFormIn
 from app.web.schemas import CustomerEditContextIn, CustomerEditFormIn
 from app.web.token_service import TokenError, verify_specification_context_token, verify_estimate_context_token
 from app.web.token_service import verify_specification_edit_context_token, verify_customer_edit_context_token
+from app.web.token_service import verify_customer_batch_context_token
+from app.repositories.customer_upload_batch_repository import CustomerUploadBatchRepository
+from app.repositories.customer_upload_batch_statuses import CustomerUploadBatchStatus
+from app.services.customer_batch_data_service import (
+    assemble_customer_data_from_batch_files,
+    customer_fields_for_create,
+)
+from app.services.customer_batch_recognition_service import validate_document_kit
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +329,61 @@ async def get_customer_edit_context(
         return error_response(401, error.code, error.message)
 
     try:
+        batch_context = verify_customer_batch_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError:
+        batch_context = None
+
+    if batch_context is not None:
+        repository = CustomerUploadBatchRepository(database.pool)
+        batch = await repository.get_batch_by_id(int(batch_context.batch_id))
+        if batch is None:
+            return error_response(404, "BATCH_NOT_FOUND", "Пакет документов не найден")
+        if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+            return error_response(
+                409,
+                "BATCH_ALREADY_SAVED",
+                "Клиент по этому пакету уже сохранён",
+            )
+        files = await repository.get_batch_files(int(batch_context.batch_id))
+        kit = validate_document_kit(files)
+        assembled = assemble_customer_data_from_batch_files(
+            files,
+            kit_warnings=kit.warnings,
+        )
+        values = {
+            "passport": assembled.fields.get("passport"),
+            "last_name": assembled.fields.get("last_name"),
+            "first_name": assembled.fields.get("first_name"),
+            "surname": assembled.fields.get("surname"),
+            "last_name_translit": None,
+            "first_name_translit": None,
+            "surname_translit": None,
+            "date_issue": assembled.fields.get("date_issue"),
+            "by_whom_issued": assembled.fields.get("by_whom_issued"),
+            "department_code": assembled.fields.get("department_code"),
+            "registration_address": assembled.fields.get("registration_address"),
+            "ipain": assembled.fields.get("ipain"),
+            "tin": assembled.fields.get("tin"),
+            "phone": assembled.fields.get("phone"),
+            "email": assembled.fields.get("email"),
+        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mode": "create_from_batch",
+                "batch_id": batch_context.batch_id,
+                "customer_path": batch.get("customer_path"),
+                "warnings": assembled.warnings,
+                "values": values,
+            },
+        )
+
+    try:
         context = verify_customer_edit_context_token(
             form.context_token,
             secret=settings.mini_app_token_secret,
@@ -351,7 +414,15 @@ async def get_customer_edit_context(
         "email": customer.get("email"),
     }
 
-    return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "values": values})
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "mode": "edit",
+            "customer_id": context.customer_id,
+            "values": values,
+        },
+    )
 
 
 @router.put("/api/customers")
@@ -378,6 +449,104 @@ async def update_customer_api(
         )
     except InitDataError as error:
         return error_response(401, error.code, error.message)
+
+    try:
+        batch_context = verify_customer_batch_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError:
+        batch_context = None
+
+    if batch_context is not None:
+        repository = CustomerUploadBatchRepository(database.pool)
+        batch = await repository.get_batch_by_id(int(batch_context.batch_id))
+        if batch is None:
+            return error_response(404, "BATCH_NOT_FOUND", "Пакет документов не найден")
+        if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+            return error_response(
+                409,
+                "BATCH_ALREADY_SAVED",
+                "Клиент по этому пакету уже сохранён",
+            )
+
+        passport = (form.passport or "").strip()
+        if not passport or not (form.last_name or "").strip() or not (form.first_name or "").strip():
+            return error_response(
+                422,
+                "VALIDATION_ERROR",
+                "Заполните фамилию, имя и паспорт",
+            )
+
+        existing = await database.find_customer_by_passport(passport)
+        if existing:
+            return error_response(
+                409,
+                "PASSPORT_ALREADY_EXISTS",
+                "Клиент с таким паспортом уже существует",
+            )
+
+        files = await repository.get_batch_files(int(batch_context.batch_id))
+        assembled = assemble_customer_data_from_batch_files(files)
+        overrides = form.model_dump(
+            exclude={"context_token", "telegram_init_data"},
+        )
+        if overrides.get("date_issue") is not None:
+            date_issue = overrides["date_issue"]
+            overrides["date_issue"] = (
+                date_issue.isoformat()
+                if hasattr(date_issue, "isoformat")
+                else str(date_issue)
+            )
+        customer_data = customer_fields_for_create(
+            assembled,
+            customer_path=batch.get("customer_path"),
+            overrides=overrides,
+        )
+        try:
+            customer = await database.create_customer(customer_data)
+            await repository.mark_batch_customer_saved(int(batch_context.batch_id))
+        except Exception:
+            logger.exception(
+                "Failed to create customer from batch_id=%s",
+                batch_context.batch_id,
+            )
+            return error_response(
+                500,
+                "CUSTOMER_CREATE_ERROR",
+                "Не удалось сохранить клиента",
+            )
+
+        try:
+            notify_chat_id = int(batch_context.origin_chat_id or telegram_user.id)
+            has_est = await customer_has_estimate(customer, database)
+            await bot.send_message(
+                chat_id=notify_chat_id,
+                text="✅ Клиент добавлен\n\n"
+                + await build_customer_card(customer, database),
+                reply_markup=build_customer_card_keyboard(
+                    customer,
+                    is_admin=False,
+                    has_estimate=has_est,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify after batch customer create batch_id=%s",
+                batch_context.batch_id,
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "mode": "create_from_batch",
+                "customer_id": customer["id"],
+                "batch_id": batch_context.batch_id,
+                "message": "Клиент сохранён",
+            },
+        )
 
     try:
         context = verify_customer_edit_context_token(

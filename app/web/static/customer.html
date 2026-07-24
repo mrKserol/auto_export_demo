@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Данные клиента</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="/static/customer.css?v=2" />
+  <link rel="stylesheet" href="/static/customer.css?v=3" />
 </head>
 <body>
   <main class="page">
@@ -16,6 +16,7 @@
 
     <div id="form-error" class="alert" hidden></div>
     <div id="form-success" class="alert" hidden></div>
+    <div id="form-warnings" class="alert" hidden></div>
 
     <form id="customer-form" novalidate>
       <label class="field"><span>Паспорт</span><input name="passport" type="text" placeholder="80 00 000000" autocomplete="off" /></label>
@@ -44,7 +45,7 @@
       <button id="fallback-submit" class="fallback-submit" type="submit">Сохранить данные</button>
     </form>
   </main>
-  <script src="/static/customer.js?v=2" defer></script>
+  <script src="/static/customer.js?v=3" defer></script>
   <style>
     /* minimal safe spacing for MainButton */
     body { padding-bottom: 80px; }

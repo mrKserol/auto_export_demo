@@ -29,6 +29,7 @@ from app.services.customer_batch_recognition_service import (
 from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
+from app.services.customer_folder_service import CustomerFolderService
 from app.services.yandex_gpt_service import YandexGPTService
 from app.services.yandex_ocr_service import YandexOCRService
 from app.services.estimate_recognition_service import EstimateRecognitionService
@@ -121,6 +122,10 @@ async def run_application(settings: Settings) -> None:
         repository=customer_upload_batch_repository,
         recognition_service=customer_document_recognition_service,
     )
+    customer_folder_service = CustomerFolderService(
+        repository=customer_upload_batch_repository,
+        yandex_disk_client=yandex_disk_client,
+    )
 
     polling_task = asyncio.create_task(
         dispatcher.start_polling(
@@ -133,6 +138,7 @@ async def run_application(settings: Settings) -> None:
             estimate_recognition_service=estimate_recognition_service,
             customer_upload_batch_repository=customer_upload_batch_repository,
             customer_batch_recognition_service=customer_batch_recognition_service,
+            customer_folder_service=customer_folder_service,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",

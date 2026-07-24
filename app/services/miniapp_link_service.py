@@ -8,6 +8,7 @@ from app.web.token_service import (
     create_specification_context_token,
     create_specification_edit_context_token,
     create_customer_edit_context_token,
+    create_customer_batch_context_token,
 )
 
 
@@ -129,12 +130,41 @@ def create_customer_edit_token(
     )
 
 
+def create_customer_batch_token(
+    settings: Settings,
+    *,
+    batch_id: int,
+    telegram_user_id: int,
+    origin_chat_id: int,
+) -> str:
+    return create_customer_batch_context_token(
+        secret=settings.mini_app_token_secret,
+        batch_id=batch_id,
+        telegram_user_id=telegram_user_id,
+        origin_chat_id=origin_chat_id,
+        ttl_seconds=settings.mini_app_token_ttl_seconds,
+    )
+
+
 def build_customer_edit_open_keyboard(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✏️ Открыть данные клиента",
+                    web_app=WebAppInfo(url=url),
+                )
+            ]
+        ]
+    )
+
+
+def build_customer_batch_edit_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Ручная коррекция",
                     web_app=WebAppInfo(url=url),
                 )
             ]

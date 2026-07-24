@@ -23,7 +23,9 @@ from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionResult,
     CustomerDocumentRecognitionService,
 )
+from app.services.customer_folder_service import FolderFinalizeResult
 from app.services.yandex_ocr_service import YandexOCRService, _retry_delay_seconds
+from app.config import Settings
 from tests.postgres_test_utils import (
     ensure_postgres_on_path,
     resolve_test_database_url,
@@ -509,18 +511,51 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
         callback = _callback()
         bot = AsyncMock()
         state = _mock_state(batch["id"])
+        folder_service = AsyncMock()
+        folder_service.ensure_batch_files_saved = AsyncMock(
+            return_value=FolderFinalizeResult(
+                batch_id=batch["id"],
+                customer_path="/base/02_Клиенты/Ivanov_1",
+                uploaded_count=4,
+                skipped_count=0,
+                failed_count=0,
+                status=CustomerUploadBatchStatus.FILES_SAVED,
+            )
+        )
+        settings = Settings(
+            telegram_bot_token="1:TEST",
+            database_url=self.database_url,
+            yandex_disk_token="token",
+            yandex_disk_base_path="/base",
+            yandex_function_url=None,
+            enable_processing=False,
+            yandex_api_key="key",
+            yandex_cloud_folder_id="folder",
+            ocr_min_delay_seconds=1.5,
+            max_ocr_retries=3,
+            mini_app_base_url="https://example.com",
+            mini_app_token_secret="secret",
+            web_host="0.0.0.0",
+            web_port=8000,
+            mini_app_token_ttl_seconds=900,
+            telegram_init_data_max_age_seconds=900,
+            customer_upload_max_file_bytes=1024,
+        )
         await handle_batch_process(
             callback,
             state,
             bot,
+            settings,
             self.repo,
             service,
+            folder_service,
         )
         texts = [call.args[0] for call in callback.message.answer.await_args_list]
         self.assertTrue(any("Распознаю документы" in text for text in texts))
-        self.assertTrue(any("Данные готовы" in text for text in texts))
+        self.assertTrue(any("Распознанные данные клиента" in text for text in texts))
         refreshed = await self.repo.get_batch_by_id(batch["id"])
         self.assertEqual(refreshed["status"], CustomerUploadBatchStatus.RECOGNIZED)
+        folder_service.ensure_batch_files_saved.assert_awaited()
 
     async def test_ocr_429_retries_limited(self) -> None:
         delays: list[float] = []

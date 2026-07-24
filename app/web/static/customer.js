@@ -4,12 +4,19 @@
   const fallback = document.getElementById("fallback-submit");
   const formError = document.getElementById("form-error");
   const formSuccess = document.getElementById("form-success");
+  const formWarnings = document.getElementById("form-warnings");
   let submitting = false;
 
   function getContextToken(){ const params=new URLSearchParams(window.location.search); return (params.get("token")||"").trim(); }
-  function clearMessages(){ if(formError) formError.hidden=true; if(formSuccess) formSuccess.hidden=true; }
+  function clearMessages(){ if(formError) formError.hidden=true; if(formSuccess) formSuccess.hidden=true; if(formWarnings) formWarnings.hidden=true; }
   function showError(msg){ if(formError){ formError.hidden=false; formError.textContent=msg; } }
   function showSuccess(msg){ if(formSuccess){ formSuccess.hidden=false; formSuccess.textContent=msg; } }
+  function showWarnings(items){
+    if(!formWarnings) return;
+    if(!items || !items.length){ formWarnings.hidden=true; formWarnings.textContent=""; return; }
+    formWarnings.hidden=false;
+    formWarnings.textContent = "Предупреждения:\n" + items.map((item)=>"• "+item).join("\n");
+  }
 
   const isTelegram = Boolean(tg && tg.initData);
   if (isTelegram) {
@@ -46,6 +53,10 @@
         const el = form.querySelector(`[name="${k}"]`);
         if(el && v !== null && v !== undefined) el.value = v;
       });
+      showWarnings(data.warnings || []);
+      if (data.mode === "create_from_batch" && tg && tg.MainButton) {
+        tg.MainButton.setText("Сохранить клиента");
+      }
     }catch(e){ showError("Ошибка сети при загрузке"); }
     finally{ setLoading(false); }
   }

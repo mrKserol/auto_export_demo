@@ -27,16 +27,54 @@ class YandexDiskClient:
         async with aiohttp.ClientSession(headers=self._headers) as session:
             await self._create_directories(session, self.base_path)
 
-    async def upload_bytes(self, path: str, content: bytes) -> str:
+    async def upload_bytes(
+        self,
+        path: str,
+        content: bytes,
+        *,
+        overwrite: bool = True,
+    ) -> str:
         disk_path = self._normalize_path(path)
         await self._ensure_parent_directory(disk_path)
 
         async with aiohttp.ClientSession(headers=self._headers) as session:
-            upload_url = await self._get_upload_url(session, disk_path)
+            upload_url = await self._get_upload_url(
+                session,
+                disk_path,
+                overwrite=overwrite,
+            )
             async with session.put(upload_url, data=content) as response:
                 response.raise_for_status()
 
         return disk_path
+
+    async def path_exists(self, path: str) -> bool:
+        disk_path = self._normalize_path(path)
+        url = f"{YANDEX_DISK_API_URL}?path={quote(disk_path, safe='')}"
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    return True
+                if response.status == 404:
+                    return False
+                response.raise_for_status()
+        return False
+
+    async def try_create_directory(self, path: str) -> bool:
+        """Create a directory. Return True if newly created, False if it already exists."""
+        disk_path = self._normalize_path(path)
+        parent = disk_path.rsplit("/", 1)[0]
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            if parent and parent != "/":
+                await self._create_directories(session, parent)
+            url = f"{YANDEX_DISK_API_URL}?path={quote(disk_path, safe='')}"
+            async with session.put(url) as response:
+                if response.status == 201:
+                    return True
+                if response.status == 409:
+                    return False
+                response.raise_for_status()
+        return False
 
     async def ensure_directory(self, path: str) -> None:
         async with aiohttp.ClientSession(headers=self._headers) as session:
@@ -63,6 +101,12 @@ class YandexDiskClient:
                 response.raise_for_status()
 
         return destination_path
+
+    def build_customer_folder_path(self, folder_name: str) -> str:
+        return f"{self.base_path}/{CUSTOMERS_FOLDER}/{folder_name}"
+
+    def build_customer_file_path(self, folder_name: str, file_name: str) -> str:
+        return f"{self.build_customer_folder_path(folder_name)}/{file_name}"
 
     async def _ensure_parent_directory(self, path: str) -> None:
         parent = path.rsplit("/", 1)[0]
@@ -95,10 +139,13 @@ class YandexDiskClient:
         self,
         session: aiohttp.ClientSession,
         path: str,
+        *,
+        overwrite: bool = True,
     ) -> str:
         url = (
             f"{YANDEX_DISK_API_URL}/upload"
-            f"?path={quote(path, safe='')}&overwrite=true"
+            f"?path={quote(path, safe='')}"
+            f"&overwrite={str(overwrite).lower()}"
         )
         async with session.get(url) as response:
             response.raise_for_status()

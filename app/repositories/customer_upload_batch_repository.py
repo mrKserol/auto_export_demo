@@ -640,6 +640,47 @@ class CustomerUploadBatchRepository:
                 )
             return result
 
+    async def clear_file_temporary_content(self, file_id: int) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    temporary_content = NULL,
+                    updated_at = NOW()
+                WHERE id = $1;
+                """,
+                file_id,
+            )
+
+    async def mark_batch_customer_saved(self, batch_id: int) -> dict:
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    updated_at = $3,
+                    completed_at = COALESCE(completed_at, $3)
+                WHERE id = $1
+                RETURNING *;
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.CUSTOMER_SAVED,
+                now,
+            )
+            result = _record_to_dict(row)
+            if result is None:
+                raise LookupError(f"customer_upload_batch id={batch_id} not found")
+            return result
+
+    async def mark_batch_awaiting_confirmation(self, batch_id: int) -> dict:
+        return await self.update_batch_status(
+            batch_id,
+            CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
+        )
+
     async def clear_batch_file_contents(self, batch_id: int) -> int:
         async with self._pool.acquire() as connection:
             result = await connection.execute(

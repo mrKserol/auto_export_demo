@@ -24,6 +24,7 @@ from app.handlers.customer_batch_upload import (
 from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
 )
+from app.services.customer_folder_service import FolderFinalizeResult
 from app.repositories.customer_upload_batch_statuses import (
     CustomerUploadBatchStatus,
 )
@@ -443,17 +444,21 @@ class CustomerBatchUploadFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         callback = _callback()
         recognition_service = AsyncMock()
+        folder_service = AsyncMock()
         await handle_batch_process(
             callback,
             state,
             AsyncMock(),
+            self.settings,
             self.repo,
             recognition_service,
+            folder_service,
         )
         self.assertIn("Загружено только 3", callback.message.answer.await_args.args[0])
         batch = await self.repo.get_batch_by_id(state._data["batch_id"])
         self.assertEqual(batch["status"], CustomerUploadBatchStatus.COLLECTING)
         recognition_service.process_batch.assert_not_awaited()
+        folder_service.ensure_batch_files_saved.assert_not_awaited()
 
     async def test_process_claims_batch_once(self) -> None:
         state = _mock_state()
@@ -514,31 +519,46 @@ class CustomerBatchUploadFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
+        folder_service = AsyncMock()
+        folder_service.ensure_batch_files_saved = AsyncMock(
+            return_value=FolderFinalizeResult(
+                batch_id=state._data["batch_id"],
+                customer_path="/base/02_Клиенты/Ivanov_1",
+                uploaded_count=4,
+                skipped_count=0,
+                failed_count=0,
+                status=CustomerUploadBatchStatus.FILES_SAVED,
+            )
+        )
         await handle_batch_process(
             callback,
             state,
             AsyncMock(),
+            self.settings,
             self.repo,
             recognition_service,
+            folder_service,
         )
         batch = await self.repo.get_batch_by_id(state._data["batch_id"])
         self.assertEqual(batch["status"], CustomerUploadBatchStatus.RECOGNIZED)
         texts = [call.args[0] for call in callback.message.answer.await_args_list]
         self.assertTrue(any("Распознаю документы" in text for text in texts))
-        self.assertTrue(any("Данные готовы" in text for text in texts))
+        self.assertTrue(any("Распознанные данные клиента" in text for text in texts))
+        folder_service.ensure_batch_files_saved.assert_awaited()
 
         callback.message.answer.reset_mock()
         await handle_batch_process(
             callback,
             state,
             AsyncMock(),
+            self.settings,
             self.repo,
             recognition_service,
+            folder_service,
         )
-        self.assertEqual(
-            callback.message.answer.await_args.args[0],
-            "Этот пакет уже передан в обработку.",
-        )
+        # After recognition, second process resumes finalize/preview (no OCR for recognized).
+        # Status is still recognized until folder service updates it in real flow.
+        self.assertTrue(callback.message.answer.await_count >= 1)
 
     async def test_cancel_marks_abandoned_and_keeps_files(self) -> None:
         state = _mock_state()

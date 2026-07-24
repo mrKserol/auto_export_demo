@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    WebAppInfo,
 )
 
 from app.config import Settings
@@ -22,12 +23,23 @@ from app.repositories.customer_upload_batch_repository import (
 from app.repositories.customer_upload_batch_statuses import (
     CustomerUploadBatchStatus,
 )
+from app.services.customer_batch_data_service import (
+    assemble_customer_data_from_batch_files,
+    format_customer_data_preview,
+)
 from app.services.customer_batch_recognition_service import (
     CustomerBatchRecognitionService,
+    format_kit_telegram_message,
+    validate_document_kit,
 )
 from app.services.customer_file_download_service import (
     CustomerFileDownloadError,
     download_customer_file_from_telegram,
+)
+from app.services.customer_folder_service import CustomerFolderService
+from app.services.miniapp_link_service import (
+    build_customer_edit_miniapp_url,
+    create_customer_batch_token,
 )
 from app.states.customer_states import CustomerBatchUploadStates
 
@@ -142,8 +154,10 @@ async def handle_batch_process(
     callback: CallbackQuery,
     state: FSMContext,
     bot: Bot,
+    settings: Settings,
     customer_upload_batch_repository: CustomerUploadBatchRepository,
     customer_batch_recognition_service: CustomerBatchRecognitionService,
+    customer_folder_service: CustomerFolderService,
 ) -> None:
     if callback.message is None or callback.from_user is None:
         await callback.answer()
@@ -168,15 +182,8 @@ async def handle_batch_process(
         await callback.answer()
         return
 
-    if status in {
-        CustomerUploadBatchStatus.RECOGNIZED,
-        CustomerUploadBatchStatus.CREATING_FOLDER,
-        CustomerUploadBatchStatus.UPLOADING,
-        CustomerUploadBatchStatus.FILES_SAVED,
-        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
-        CustomerUploadBatchStatus.CUSTOMER_SAVED,
-    }:
-        await callback.message.answer("Этот пакет уже передан в обработку.")
+    if status == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+        await callback.message.answer("Этот пакет уже сохранён как клиент.")
         await callback.answer()
         return
 
@@ -193,49 +200,161 @@ async def handle_batch_process(
 
     await state.set_state(CustomerBatchUploadStates.processing_documents)
     await state.update_data(batch_id=batch["id"])
-    await callback.message.answer(
-        "Распознаю документы.\n"
-        f"Получено файлов: {file_count}\n\n"
-        "Это может занять некоторое время."
-    )
     await callback.answer()
 
-    logger.info(
-        "customer batch submitted for processing batch_id=%s telegram_chat_id=%s "
-        "telegram_user_id=%s media_group_id=%s file_count=%s status=%s",
-        batch["id"],
-        batch.get("telegram_chat_id"),
-        batch.get("telegram_user_id"),
-        batch.get("media_group_id"),
-        file_count,
-        status,
-    )
+    need_ocr = status in {
+        CustomerUploadBatchStatus.COLLECTING,
+        CustomerUploadBatchStatus.RECOGNIZING,
+        CustomerUploadBatchStatus.FAILED,
+    }
+    recognition_result = None
+    if need_ocr:
+        await callback.message.answer(
+            "Распознаю документы.\n"
+            f"Получено файлов: {file_count}\n\n"
+            "Это может занять некоторое время."
+        )
+        logger.info(
+            "customer batch submitted for processing batch_id=%s telegram_chat_id=%s "
+            "telegram_user_id=%s media_group_id=%s file_count=%s status=%s",
+            batch["id"],
+            batch.get("telegram_chat_id"),
+            batch.get("telegram_user_id"),
+            batch.get("media_group_id"),
+            file_count,
+            status,
+        )
+        chat_id = callback.message.chat.id
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            recognition_result = await customer_batch_recognition_service.process_batch(
+                batch["id"]
+            )
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except Exception:
+            logger.exception(
+                "customer batch recognition handler failed batch_id=%s",
+                batch["id"],
+            )
+            await callback.message.answer(
+                "Не удалось завершить распознавание документов.\n\n"
+                "Полученные файлы сохранены. Попробуйте запустить обработку повторно.",
+                reply_markup=_post_recognition_keyboard(include_edit=False),
+            )
+            return
 
-    chat_id = callback.message.chat.id
+        if recognition_result.is_technical_failure:
+            await callback.message.answer(
+                recognition_result.telegram_message,
+                reply_markup=_post_recognition_keyboard(include_edit=False),
+            )
+            return
+
     try:
-        await bot.send_chat_action(chat_id, ChatAction.TYPING)
-        result = await customer_batch_recognition_service.process_batch(batch["id"])
-        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        await bot.send_chat_action(callback.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
+        finalize = await customer_folder_service.ensure_batch_files_saved(batch["id"])
     except Exception:
         logger.exception(
-            "customer batch recognition handler failed batch_id=%s",
+            "customer batch folder finalize failed batch_id=%s",
             batch["id"],
         )
         await callback.message.answer(
-            "Не удалось завершить распознавание документов.\n\n"
-            "Полученные файлы сохранены. Попробуйте запустить обработку повторно.",
-            reply_markup=_recognition_retry_keyboard(),
+            "Документы распознаны, но не удалось сохранить файлы на Яндекс Диск.\n"
+            "Попробуйте повторить обработку.",
+            reply_markup=_post_recognition_keyboard(include_edit=True),
         )
         return
 
-    reply_markup = None
-    if result.is_technical_failure or not result.kit.is_complete:
-        reply_markup = _recognition_retry_keyboard()
+    files = await customer_upload_batch_repository.get_batch_files(batch["id"])
+    assembled = assemble_customer_data_from_batch_files(
+        files,
+        kit_warnings=(
+            recognition_result.kit.warnings if recognition_result is not None else None
+        ),
+    )
+    kit_message = (
+        recognition_result.telegram_message
+        if recognition_result is not None
+        else format_kit_telegram_message(validate_document_kit(files))
+    )
+    preview = format_customer_data_preview(
+        assembled,
+        customer_path=finalize.customer_path,
+        kit_message=kit_message,
+    )
+    if finalize.failed_count:
+        preview += (
+            "\n\nЧасть файлов не удалось загрузить на Яндекс Диск. "
+            "Папка сохранена, повторите обработку для дозагрузки."
+        )
 
     await callback.message.answer(
-        result.telegram_message,
-        reply_markup=reply_markup,
+        preview,
+        reply_markup=_post_recognition_keyboard(include_edit=True),
     )
+
+
+@router.callback_query(F.data == "customer_batch:edit")
+async def handle_batch_edit(
+    callback: CallbackQuery,
+    state: FSMContext,
+    settings: Settings,
+    customer_upload_batch_repository: CustomerUploadBatchRepository,
+) -> None:
+    if callback.message is None or callback.from_user is None:
+        await callback.answer()
+        return
+
+    batch = await _resolve_batch_for_callback(
+        callback=callback,
+        state=state,
+        repository=customer_upload_batch_repository,
+    )
+    if batch is None:
+        await callback.message.answer(
+            "Активный пакет документов не найден.\n"
+            "Начните заново командой /add_customer"
+        )
+        await callback.answer()
+        return
+
+    if batch["status"] in {
+        CustomerUploadBatchStatus.ABANDONED,
+        CustomerUploadBatchStatus.CUSTOMER_SAVED,
+    }:
+        await callback.message.answer("Этот пакет уже недоступен для редактирования.")
+        await callback.answer()
+        return
+
+    token = create_customer_batch_token(
+        settings,
+        batch_id=int(batch["id"]),
+        telegram_user_id=callback.from_user.id,
+        origin_chat_id=callback.message.chat.id,
+    )
+    url = build_customer_edit_miniapp_url(settings, token)
+    if batch["status"] not in {
+        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
+        CustomerUploadBatchStatus.CUSTOMER_SAVED,
+    }:
+        await customer_upload_batch_repository.mark_batch_awaiting_confirmation(
+            int(batch["id"])
+        )
+    await state.update_data(batch_id=batch["id"])
+    await callback.message.answer(
+        "Откройте форму «Данные клиента» и проверьте распознанные поля.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📝 Ручная коррекция",
+                        web_app=WebAppInfo(url=url),
+                    )
+                ]
+            ]
+        ),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "customer_batch:cancel")
@@ -253,7 +372,10 @@ async def handle_batch_cancel(
         state=state,
         repository=customer_upload_batch_repository,
     )
-    if batch is not None and batch["status"] == CustomerUploadBatchStatus.COLLECTING:
+    if batch is not None and batch["status"] not in {
+        CustomerUploadBatchStatus.CUSTOMER_SAVED,
+        CustomerUploadBatchStatus.ABANDONED,
+    }:
         await customer_upload_batch_repository.update_batch_status(
             batch["id"],
             CustomerUploadBatchStatus.ABANDONED,
@@ -426,16 +548,37 @@ def _batch_keyboard(file_count: int) -> InlineKeyboardMarkup:
 
 
 def _recognition_retry_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return _post_recognition_keyboard(include_edit=False)
+
+
+def _post_recognition_keyboard(*, include_edit: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if include_edit:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="🔄 Повторить распознавание",
-                    callback_data="customer_batch:retry_recognition",
+                    text="📝 Ручная коррекция",
+                    callback_data="customer_batch:edit",
                 )
             ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 Повторить распознавание",
+                callback_data="customer_batch:retry_recognition",
+            )
         ]
     )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data="customer_batch:cancel",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _format_file_accepted_message(file_count: int) -> str:

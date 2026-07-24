@@ -43,6 +43,11 @@ class CustomerUploadBatchStatus:
             COLLECTING,
             RECOGNIZING,
             FAILED,
+            RECOGNIZED,
+            CREATING_FOLDER,
+            UPLOADING,
+            FILES_SAVED,
+            AWAITING_CONFIRMATION,
         }
     )
 
