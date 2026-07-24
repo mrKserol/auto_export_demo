@@ -28,8 +28,9 @@ from app.web.auth import InitDataError, validate_telegram_init_data
 from app.web.schemas import SpecificationFormIn
 from app.web.schemas import SpecificationEditContextIn, SpecificationEditFormIn
 from app.web.schemas import EstimateFormIn
+from app.web.schemas import CustomerEditContextIn, CustomerEditFormIn
 from app.web.token_service import TokenError, verify_specification_context_token, verify_estimate_context_token
-from app.web.token_service import verify_specification_edit_context_token
+from app.web.token_service import verify_specification_edit_context_token, verify_customer_edit_context_token
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,19 @@ async def estimate_form_page(request: Request) -> FileResponse:
     )
     return FileResponse(
         STATIC_DIR / "estimate.html",
+        media_type="text/html; charset=utf-8",
+    )
+
+
+@router.get("/miniapp/customer")
+async def customer_form_page(request: Request) -> FileResponse:
+    token = request.query_params.get("token", "")
+    logger.info(
+        "Opening customer mini app form token_present=%s",
+        bool(token),
+    )
+    return FileResponse(
+        STATIC_DIR / "customer.html",
         media_type="text/html; charset=utf-8",
     )
 
@@ -280,6 +294,148 @@ async def get_specification_edit_context(
     has_estimate = bool(await database.get_estimate_by_specification_id(int(specification_id)))
 
     return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "specification_id": specification_id, "values": editable, "price_currency": specification.get("price_currency") or "CNY", "has_estimate": has_estimate})
+
+
+@router.post("/api/customers/edit-context")
+async def get_customer_edit_context(
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    try:
+        form = CustomerEditContextIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(422, "VALIDATION_ERROR", "Проверьте заполнение формы", extra={"fields": field_errors})
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        context = verify_customer_edit_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    customer = await database.get_customer_by_id(int(context.customer_id))
+    if not customer:
+        return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+
+    values = {
+        "passport": customer.get("passport"),
+        "last_name": customer.get("last_name"),
+        "first_name": customer.get("first_name"),
+        "surname": customer.get("surname"),
+        "last_name_translit": customer.get("last_name_translit"),
+        "first_name_translit": customer.get("first_name_translit"),
+        "surname_translit": customer.get("surname_translit"),
+        "date_issue": customer.get("date_issue"),
+        "by_whom_issued": customer.get("by_whom_issued"),
+        "department_code": customer.get("department_code"),
+        "registration_address": customer.get("registration_address"),
+        "ipain": customer.get("ipain"),
+        "tin": customer.get("tin"),
+        "phone": customer.get("phone"),
+        "email": customer.get("email"),
+    }
+
+    return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "values": values})
+
+
+@router.put("/api/customers")
+async def update_customer_api(
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+    bot: Bot = Depends(get_bot),
+) -> JSONResponse:
+    try:
+        form = CustomerEditFormIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(422, "VALIDATION_ERROR", "Проверьте заполнение формы", extra={"fields": field_errors})
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        context = verify_customer_edit_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    customer = await database.get_customer_by_id(int(context.customer_id))
+    if not customer:
+        return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+
+    # prevent passport collision
+    new_passport = form.passport.strip()
+    if new_passport and new_passport != (customer.get("passport") or ""):
+        existing = await database.find_customer_by_passport(new_passport)
+        if existing and int(existing.get("id")) != int(customer["id"]):
+            return error_response(409, "PASSPORT_ALREADY_EXISTS", "Клиент с таким паспортом уже существует")
+
+    # collect updatable fields
+    fields = {}
+    for field in database._CUSTOMER_UPDATABLE_FIELDS:
+        if hasattr(form, field):
+            val = getattr(form, field)
+            fields[field] = val
+
+    # detect changes
+    changed = []
+    to_update = {}
+    for k, v in fields.items():
+        old = customer.get(k)
+        old_s = "" if old is None else str(old)
+        new_s = "" if v is None else str(v)
+        if old_s != new_s:
+            changed.append(k)
+            to_update[k] = v
+
+    if to_update:
+        try:
+            updated = await database.update_customer_fields(int(customer["id"]), to_update)
+        except Exception:
+            logger.exception("Failed to update customer_id=%s", customer["id"])
+            return error_response(500, "CUSTOMER_UPDATE_ERROR", "Не удалось обновить данные клиента")
+    else:
+        updated = customer
+
+    # notify user
+    try:
+        telegram_chat_id = int(telegram_user.id)
+        await bot.send_message(chat_id=telegram_chat_id, text="✅ Данные клиента обновлены")
+        has_est = await customer_has_estimate(updated, database)
+        await bot.send_message(chat_id=telegram_chat_id, text=await build_customer_card(updated, database), reply_markup=build_customer_card_keyboard(updated, is_admin=False, has_estimate=has_est))
+    except Exception:
+        logger.exception("Failed to notify user after customer update")
+
+    return JSONResponse(status_code=200, content={"ok": True, "customer_id": updated["id"], "changed_fields": changed, "message": "Данные клиента сохранены"})
 
 
 @router.put("/api/specifications")

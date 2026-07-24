@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Данные клиента</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/customer.css?v=1" />
+</head>
+<body>
+  <main class="page">
+    <header class="header">
+      <h1>Данные клиента</h1>
+      <p class="subtitle">Проверьте данные клиента и внесите необходимые изменения</p>
+    </header>
+
+    <div id="form-error" class="alert" hidden></div>
+    <div id="form-success" class="alert" hidden></div>
+
+    <form id="customer-form" novalidate>
+      <label class="field"><span>Паспорт</span><input name="passport" type="text" placeholder="80 00 000000" autocomplete="off" /></label>
+
+      <fieldset class="group"><legend>ФИО</legend>
+        <label class="field"><span>Фамилия</span><input name="last_name" type="text" /></label>
+        <label class="field"><span>Имя</span><input name="first_name" type="text" /></label>
+        <label class="field"><span>Отчество</span><input name="surname" type="text" /></label>
+      </fieldset>
+
+      <fieldset class="group"><legend>ФИО (лат.)</legend>
+        <label class="field"><span>Фамилия (лат.)</span><input name="last_name_translit" type="text" /></label>
+        <label class="field"><span>Имя (лат.)</span><input name="first_name_translit" type="text" /></label>
+        <label class="field"><span>Отчество (лат.)</span><input name="surname_translit" type="text" /></label>
+      </fieldset>
+
+      <label class="field"><span>Дата выдачи</span><input name="date_issue" type="date" /></label>
+      <label class="field"><span>Кем выдан</span><textarea name="by_whom_issued"></textarea></label>
+      <label class="field"><span>Код подразделения</span><input name="department_code" type="text" placeholder="020-001" /></label>
+      <label class="field"><span>Адрес регистрации</span><textarea name="registration_address"></textarea></label>
+      <label class="field"><span>СНИЛС</span><input name="ipain" type="text" placeholder="123-456-789 00" /></label>
+      <label class="field"><span>ИНН</span><input name="tin" inputmode="numeric" /></label>
+      <label class="field"><span>Телефон</span><input name="phone" type="tel" /></label>
+      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" /></label>
+
+      <button id="fallback-submit" class="fallback-submit" type="submit">Сохранить данные</button>
+    </form>
+  </main>
+  <script src="/static/customer.js?v=1" defer></script>
+  <style>
+    /* minimal safe spacing for MainButton */
+    body { padding-bottom: 80px; }
+  </style>
+</body>
+</html>
+

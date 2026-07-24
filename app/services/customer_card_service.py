@@ -14,6 +14,16 @@ def build_customer_card_keyboard(
 ) -> InlineKeyboardMarkup:
     customer_id = int(customer["id"])
     rows: list[list[InlineKeyboardButton]] = []
+    # Top admin action: open customer edit miniapp
+    if is_admin:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✏️ Изменить данные клиента",
+                    callback_data=f"customer_edit:{customer_id}",
+                )
+            ]
+        )
 
     if customer.get("specification_id"):
         if has_estimate:
@@ -83,13 +93,9 @@ def build_customer_card_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="Изменить данные",
-                    callback_data=f"customer_edit:{customer_id}",
-                ),
-                InlineKeyboardButton(
                     text="Удалить клиента",
                     callback_data=f"customer_delete:{customer_id}",
-                ),
+                )
             ]
         )
 

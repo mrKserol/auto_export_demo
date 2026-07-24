@@ -175,6 +175,50 @@ class SpecificationEditFormIn(SpecificationFormIn):
         return (v or "").strip()
 
 
+from pydantic import EmailStr
+from datetime import date
+
+
+class CustomerFields(BaseModel):
+    passport: str
+    last_name: str
+    first_name: str
+    surname: str | None = None
+
+    last_name_translit: str | None = None
+    first_name_translit: str | None = None
+    surname_translit: str | None = None
+
+    date_issue: date | None = None
+    by_whom_issued: str | None = None
+    department_code: str | None = None
+    registration_address: str | None = None
+    ipain: str | None = None
+    tin: str | None = None
+    phone: str | None = None
+    email: EmailStr | None = None
+
+
+class CustomerEditContextIn(BaseModel):
+    context_token: str
+    telegram_init_data: str
+
+    @field_validator("context_token", "telegram_init_data", mode="before")
+    @classmethod
+    def strip_strings(cls, v):
+        return (v or "").strip()
+
+
+class CustomerEditFormIn(CustomerFields):
+    context_token: str
+    telegram_init_data: str
+
+    @field_validator("context_token", "telegram_init_data", mode="before")
+    @classmethod
+    def strip_strings2(cls, v):
+        return (v or "").strip()
+
+
 class EstimateFormIn(BaseModel):
     engine_power: Decimal
     exchange_rate: Decimal

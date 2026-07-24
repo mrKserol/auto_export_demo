@@ -134,6 +134,7 @@ async def handle_customer_edit_menu(
     state: FSMContext,
     bot: Bot,
 ) -> None:
+    # New flow: open customer edit miniapp (replace old FSM menu)
     if callback.message is None or callback.from_user is None:
         return
 
@@ -144,12 +145,32 @@ async def handle_customer_edit_menu(
         return
 
     customer_id = int(callback.data.split(":", 1)[1])
-    await state.set_state(CustomerEditStates.choosing_field)
-    await state.update_data(customer_id=customer_id)
-    await callback.message.answer(
-        "Выберите поле для изменения:",
-        reply_markup=_build_customer_field_keyboard(customer_id),
+    from app.config import load_settings
+    from app.services.miniapp_link_service import create_customer_edit_token, build_customer_edit_miniapp_url, build_customer_edit_open_keyboard
+
+    settings = load_settings()
+    token = create_customer_edit_token(
+        settings,
+        customer_id=customer_id,
+        telegram_user_id=callback.from_user.id,
+        origin_chat_id=callback.message.chat.id,
     )
+    url = build_customer_edit_miniapp_url(settings, token)
+
+    if callback.message.chat.type == "private":
+        await callback.message.answer("Откройте форму с данными клиента:", reply_markup=build_customer_edit_open_keyboard(url))
+        await callback.answer()
+        return
+
+    me = await bot.get_me()
+    bot_username = me.username or ""
+    launch_code = await state.ctx.data.get("database").create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=settings.mini_app_token_ttl_seconds) if False else None
+    deep_link = f"https://t.me/{bot_username}?start=cus_{(launch_code or '')}"
+    try:
+        await bot.send_message(chat_id=callback.from_user.id, text="Откройте форму с данными клиента:", reply_markup=build_customer_edit_open_keyboard(url))
+        await callback.message.answer("Форма отправлена вам в личный чат с ботом.")
+    except Exception:
+        await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=deep_link)]]))
     await callback.answer()
 
 
