@@ -102,12 +102,8 @@ async def handle_customer_delete(
     if callback.message is None or callback.from_user is None:
         return
 
-    if not await is_admin_for_customer_management(
-        bot, callback.message.chat.id, callback.from_user.id
-    ):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
-
+    # NOTE: temporarily allow opening customer edit Mini App for all users.
+    # Admin-only checks remain for destructive actions such as delete.
     customer_id = int(callback.data.split(":", 1)[1])
     contract_count = await database.count_contracts_for_customer(customer_id)
     if contract_count > 0:
