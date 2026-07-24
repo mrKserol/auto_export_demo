@@ -23,11 +23,11 @@ def build_customer_card_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text="Договор",
+                        text="Распечатать Договор",
                         callback_data=f"contract:generate:{customer_id}",
                     ),
                     InlineKeyboardButton(
-                        text="Смета",
+                        text="Распечатать Смету",
                         callback_data=f"estimate:file:{customer_id}",
                     ),
                 ]
@@ -101,11 +101,11 @@ def build_estimate_actions_keyboard(customer_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="Договор",
+                    text="Распечатать Договор",
                     callback_data=f"contract:generate:{customer_id}",
                 ),
                 InlineKeyboardButton(
-                    text="Смета",
+                    text="Распечатать Смету",
                     callback_data=f"estimate:file:{customer_id}",
                 ),
             ]
