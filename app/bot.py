@@ -24,6 +24,7 @@ from app.services.customer_document_recognition_service import (
 )
 from app.services.yandex_gpt_service import YandexGPTService
 from app.services.yandex_ocr_service import YandexOCRService
+from app.services.estimate_recognition_service import EstimateRecognitionService
 from app.web.app import create_fastapi_app
 from app.yadisk_client import YandexDiskClient
 from app.yandex_function_client import YandexFunctionClient
@@ -84,6 +85,10 @@ async def run_application(settings: Settings) -> None:
         ocr_service=yandex_ocr_service,
         gpt_service=yandex_gpt_service,
     )
+    estimate_recognition_service = EstimateRecognitionService(
+        ocr_service=yandex_ocr_service,
+        gpt_service=yandex_gpt_service,
+    )
 
     fastapi_app = create_fastapi_app(
         settings=settings,
@@ -110,6 +115,7 @@ async def run_application(settings: Settings) -> None:
             yandex_disk_client=yandex_disk_client,
             yandex_function_client=yandex_function_client,
             customer_document_recognition_service=customer_document_recognition_service,
+                estimate_recognition_service=estimate_recognition_service,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",

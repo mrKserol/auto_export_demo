@@ -16,6 +16,27 @@
     }
   }
 
+  // Prefill support: read base64url-encoded JSON from ?prefill=...
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const prefill = params.get("prefill");
+    if (prefill) {
+      // base64url -> base64
+      let s = prefill.replace(/-/g, "+").replace(/_/g, "/");
+      while (s.length % 4) s += "=";
+      const jsonString = decodeURIComponent(escape(atob(s)));
+      const obj = JSON.parse(jsonString);
+      Object.entries(obj).forEach(([k, v]) => {
+        try {
+          const input = form.querySelector(`[name="${k}"]`);
+          if (input && v !== null && v !== undefined) input.value = v;
+        } catch (_e) {}
+      });
+    }
+  } catch (_e) {
+    // ignore prefill errors
+  }
+
   function clearErrors() {
     formError.hidden = true;
     formError.textContent = "";

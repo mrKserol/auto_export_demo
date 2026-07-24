@@ -13,6 +13,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     WebAppInfo,
 )
+from app.states.estimate_states import EstimateUploadStates
+from app.services.estimate_recognition_service import EstimateRecognitionService, EstimateRecognitionResult
 
 from app.database import Database
 from app.services.customer_card_service import build_estimate_actions_keyboard, build_estimate_creation_method_keyboard
@@ -200,6 +202,225 @@ async def handle_estimate_upload_start(callback: CallbackQuery, state: FSMContex
     from app.states.estimate_states import EstimateUploadStates
     await state.set_state(EstimateUploadStates.waiting_file)
     await callback.message.answer("Отправьте фото или PDF готовой сметы. Поддерживаются PNG, JPG, JPEG и PDF. Максимум 15 МБ. PDF до 5 страниц.")
+
+
+@router.message(
+    StateFilter(EstimateUploadStates.waiting_file),
+    F.photo,
+)
+async def handle_estimate_photo(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    estimate_recognition_service: EstimateRecognitionService,
+) -> None:
+    logger.info("handle_estimate_photo called update_id=%s", getattr(message, "message_id", None))
+    if message.from_user is None:
+        return
+    data = await state.get_data()
+    telegram_user_id = data.get("telegram_user_id")
+    customer_id = data.get("customer_id")
+    if telegram_user_id is None or int(telegram_user_id) != int(message.from_user.id):
+        await message.answer("Эта сессия принадлежит другому пользователю.")
+        return
+
+    photo = message.photo and message.photo[-1]
+    if not photo:
+        await message.answer("Не найден файл изображения.")
+        return
+
+    max_size = 15 * 1024 * 1024
+    if getattr(photo, "file_size", 0) and photo.file_size > max_size:
+        await message.answer("Файл слишком большой. Максимум 15 МБ.")
+        return
+
+    await state.set_state(EstimateUploadStates.processing)
+    await message.answer("Фото получено. Распознаю смету…")
+
+    from io import BytesIO
+    buffer = BytesIO()
+    try:
+        await bot.download(photo, destination=buffer)
+        file_bytes = buffer.getvalue()
+        logger.info(
+            "Estimate file received customer_id=%s telegram_user_id=%s mime_type=%s size=%s",
+            customer_id,
+            message.from_user.id,
+            "image/jpeg",
+            len(file_bytes),
+        )
+
+        result = await estimate_recognition_service.recognize(
+            file_bytes=file_bytes,
+            mime_type="image/jpeg",
+            filename=None,
+        )
+    except Exception:
+        logger.exception("Estimate recognition failed for message_id=%s", getattr(message, "message_id", None))
+        await state.set_state(EstimateUploadStates.waiting_file)
+        await message.answer("Не удалось распознать смету. Попробуйте отправить более чёткое изображение.")
+        return
+
+    # show summary and provide link to open prefilled form
+    summary_lines = []
+    d = result.data or {}
+    def fmt(k): return str(d.get(k)) if d.get(k) is not None else "не найдена"
+    summary_lines.append("✅ Смета распознана")
+    summary_lines.append(f"Мощность автомобиля: {fmt('engine_power')}")
+    summary_lines.append(f"Курс: {fmt('exchange_rate')}")
+    summary_lines.append(f"Стоимость автомобиля: {fmt('price')}")
+    summary_lines.append(f"Банковская комиссия: {fmt('bank_commission')}")
+    summary_lines.append(f"Осмотр и транспортировка: {fmt('inspect_transport_price')}")
+    summary_lines.append(f"Приёмка и транзит: {fmt('transit_declaration_price')}")
+    summary_lines.append(f"Страхование и доставка: {fmt('insurance_shipment')}")
+    summary_lines.append(f"Таможенные платежи: {fmt('customs_total')}")
+    summary_lines.append(f"Таможенная очистка: {fmt('custom_clearing')}")
+    summary_lines.append(f"Комиссия исполнителя: {fmt('contractor_comission')}")
+    await message.answer("\n".join(summary_lines))
+
+    # build prefill payload and URL
+    import json, base64
+    from app.config import load_settings
+    from app.services.miniapp_link_service import create_customer_estimate_token, build_estimate_miniapp_url
+
+    settings = load_settings()
+    token = create_customer_estimate_token(
+        settings,
+        customer_id=int(customer_id) if customer_id is not None else 0,
+        telegram_user_id=message.from_user.id,
+        origin_chat_id=message.chat.id,
+    )
+    prefill_json = json.dumps(result.data or {})
+    prefill_b64 = base64.urlsafe_b64encode(prefill_json.encode("utf-8")).decode("ascii").rstrip("=")
+    url = f"{build_estimate_miniapp_url(settings, token)}&prefill={prefill_b64}"
+
+    if message.chat.type == "private":
+        await message.answer("Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]]))
+    else:
+        me = await bot.get_me()
+        bot_username = me.username or ""
+        launch_code = await state.ctx.data.get("database").create_mini_app_launch_code(context_token=token, telegram_user_id=message.from_user.id, customer_id=customer_id, ttl_seconds=600) if False else None
+        # fallback: send deep link if possible
+        try:
+            await bot.send_message(chat_id=message.from_user.id, text="Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=url)]]))
+            await message.answer("Форма сметы отправлена вам в личный чат с ботом.")
+        except Exception:
+            await message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+
+    await state.clear()
+
+
+@router.message(
+    StateFilter(EstimateUploadStates.waiting_file),
+    F.document,
+)
+async def handle_estimate_document(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    estimate_recognition_service: EstimateRecognitionService,
+) -> None:
+    if message.from_user is None:
+        return
+    data = await state.get_data()
+    telegram_user_id = data.get("telegram_user_id")
+    customer_id = data.get("customer_id")
+    if telegram_user_id is None or int(telegram_user_id) != int(message.from_user.id):
+        await message.answer("Эта сессия принадлежит другому пользователю.")
+        return
+
+    doc = message.document
+    if not doc:
+        await message.answer("Не найден документ.")
+        return
+
+    allowed_mimes = {"image/jpeg", "image/png", "application/pdf"}
+    allowed_ext = {".jpg", ".jpeg", ".png", ".pdf"}
+    mime = getattr(doc, "mime_type", "") or ""
+    filename = getattr(doc, "file_name", "") or ""
+    ext = (filename.lower().rpartition(".")[-1] and "." + filename.lower().rpartition(".")[-1]) if filename else ""
+
+    if mime and mime not in allowed_mimes and ext not in allowed_ext:
+        await message.answer("Неподдерживаемый формат. Отправьте PNG, JPG или PDF.")
+        return
+
+    max_size = 15 * 1024 * 1024
+    if getattr(doc, "file_size", 0) and doc.file_size > max_size:
+        await message.answer("Файл слишком большой. Максимум 15 МБ.")
+        return
+
+    await state.set_state(EstimateUploadStates.processing)
+    await message.answer("Файл получен. Распознаю смету…")
+    from io import BytesIO
+    buffer = BytesIO()
+    try:
+        await bot.download(doc, destination=buffer)
+        file_bytes = buffer.getvalue()
+        mime_type = mime or ("application/pdf" if ext == ".pdf" else "image/jpeg")
+        logger.info(
+            "Estimate file received customer_id=%s telegram_user_id=%s mime_type=%s size=%s",
+            customer_id,
+            message.from_user.id,
+            mime_type,
+            len(file_bytes),
+        )
+
+        if mime_type == "application/pdf":
+            # PDF recognition not implemented fully yet
+            await state.set_state(EstimateUploadStates.waiting_file)
+            await message.answer("Распознавание PDF пока не поддерживается. Отправьте страницу сметы как изображение.")
+            return
+
+        result = await estimate_recognition_service.recognize(
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            filename=filename,
+        )
+    except Exception:
+        logger.exception("Estimate recognition failed for document message_id=%s", getattr(message, "message_id", None))
+        await state.set_state(EstimateUploadStates.waiting_file)
+        await message.answer("Не удалось распознать смету. Попробуйте отправить более чёткое изображение.")
+        return
+
+    # show summary (same as photo)
+    summary_lines = []
+    d = result.data or {}
+    def fmt(k): return str(d.get(k)) if d.get(k) is not None else "не найдена"
+    summary_lines.append("✅ Смета распознана")
+    summary_lines.append(f"Мощность автомобиля: {fmt('engine_power')}")
+    summary_lines.append(f"Курс: {fmt('exchange_rate')}")
+    summary_lines.append(f"Стоимость автомобиля: {fmt('price')}")
+    summary_lines.append(f"Банковская комиссия: {fmt('bank_commission')}")
+    summary_lines.append(f"Осмотр и транспортировка: {fmt('inspect_transport_price')}")
+    summary_lines.append(f"Приёмка и транзит: {fmt('transit_declaration_price')}")
+    summary_lines.append(f"Страхование и доставка: {fmt('insurance_shipment')}")
+    summary_lines.append(f"Таможенные платежи: {fmt('customs_total')}")
+    summary_lines.append(f"Таможенная очистка: {fmt('custom_clearing')}")
+    summary_lines.append(f"Комиссия исполнителя: {fmt('contractor_comission')}")
+    await message.answer("\n".join(summary_lines))
+
+    # build prefill url similar to photo handler
+    import json, base64
+    from app.config import load_settings
+    from app.services.miniapp_link_service import create_customer_estimate_token, build_estimate_miniapp_url
+
+    settings = load_settings()
+    token = create_customer_estimate_token(
+        settings,
+        customer_id=int(customer_id) if customer_id is not None else 0,
+        telegram_user_id=message.from_user.id,
+        origin_chat_id=message.chat.id,
+    )
+    prefill_json = json.dumps(result.data or {})
+    prefill_b64 = base64.urlsafe_b64encode(prefill_json.encode("utf-8")).decode("ascii").rstrip("=")
+    url = f"{build_estimate_miniapp_url(settings, token)}&prefill={prefill_b64}"
+    try:
+        await bot.send_message(chat_id=message.from_user.id, text="Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=url)]]))
+        await message.answer("Форма сметы отправлена вам в личный чат с ботом.")
+    except Exception:
+        await message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("estimate:cancel:"))
