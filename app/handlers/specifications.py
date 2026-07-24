@@ -31,6 +31,8 @@ from app.services.miniapp_link_service import (
     build_specification_deep_link,
     build_specification_miniapp_url,
     create_customer_specification_token,
+    create_customer_specification_edit_token,
+    build_specification_edit_miniapp_url,
 )
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
@@ -204,7 +206,7 @@ async def handle_customer_edit_spec_public(
     if callback.message is None:
         return
     customer_id = int(callback.data.split(":", 1)[1])
-    await _open_specification_edit_menu(callback, state, database, customer_id)
+    await _open_specification_edit_miniapp(callback, state, database, customer_id)
     await callback.answer()
 
 
@@ -277,7 +279,7 @@ async def handle_edit_customer_specification(
         return
 
     customer_id = int(callback.data.split(":", 1)[1])
-    await _open_specification_edit_menu(callback, state, database, customer_id)
+    await _open_specification_edit_miniapp(callback, state, database, customer_id)
     await callback.answer()
 
 
@@ -329,6 +331,61 @@ async def _open_specification_edit_menu(
             customer_id,
         ),
     )
+
+
+async def _open_specification_edit_miniapp(
+    callback: CallbackQuery,
+    state: FSMContext,
+    database: Database,
+    customer_id: int,
+) -> None:
+    # New flow: open the specification miniapp in edit mode with an edit-token.
+    if callback.message is None or callback.from_user is None:
+        return
+
+    customer = await database.get_customer_by_id(customer_id)
+    if not customer:
+        await callback.message.answer("Клиент не найден")
+        return
+
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        await callback.message.answer("У клиента нет спецификации. Сначала добавьте её.")
+        return
+
+    specification = await database.get_specification_by_id(int(specification_id))
+    if not specification:
+        await callback.message.answer("Спецификация клиента не найдена.")
+        return
+
+    # create edit token and URL
+    from app.config import load_settings
+    from app.services.miniapp_link_service import create_customer_specification_edit_token, build_specification_edit_miniapp_url, build_specification_edit_open_keyboard
+
+    settings = load_settings()
+    token = create_customer_specification_edit_token(
+        settings,
+        customer_id=customer_id,
+        telegram_user_id=callback.from_user.id,
+        origin_chat_id=callback.message.chat.id,
+    )
+    url = build_specification_edit_miniapp_url(settings, token)
+
+    if callback.message.chat.type == "private":
+        await callback.message.answer("Откройте форму для редактирования спецификации:", reply_markup=build_specification_edit_open_keyboard(url))
+        await callback.answer()
+        return
+
+    me = await callback.bot.get_me()
+    bot_username = me.username or ""
+    launch_code = await database.create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=settings.mini_app_token_ttl_seconds)
+    deep_link = build_specification_deep_link(bot_username, launch_code)
+    try:
+        await callback.bot.send_message(chat_id=callback.from_user.id, text="Откройте форму для редактирования спецификации:", reply_markup=build_specification_edit_open_keyboard(url))
+        await callback.message.answer("Форма отправлена вам в личный чат с ботом.")
+    except Exception:
+        await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.", reply_markup=build_deep_link_keyboard(deep_link))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("spec_edit_back:"))

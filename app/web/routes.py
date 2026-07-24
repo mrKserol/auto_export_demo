@@ -26,8 +26,10 @@ from app.services.specification_service import (
 from app.services.estimate_service import create_estimate, format_estimate_summary
 from app.web.auth import InitDataError, validate_telegram_init_data
 from app.web.schemas import SpecificationFormIn
+from app.web.schemas import SpecificationEditContextIn, SpecificationEditFormIn
 from app.web.schemas import EstimateFormIn
 from app.web.token_service import TokenError, verify_specification_context_token, verify_estimate_context_token
+from app.web.token_service import verify_specification_edit_context_token
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +219,154 @@ async def create_specification_api(
             "message": "Спецификация сохранена",
         },
     )
+
+
+@router.post("/api/specifications/edit-context")
+async def get_specification_edit_context(
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    try:
+        form = SpecificationEditContextIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(422, "VALIDATION_ERROR", "Проверьте заполнение формы", extra={"fields": field_errors})
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        context = verify_specification_edit_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    customer = await database.get_customer_by_id(int(context.customer_id))
+    if not customer:
+        return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        return error_response(404, "SPECIFICATION_NOT_FOUND", "У клиента нет спецификации")
+    specification = await database.get_specification_by_id(int(specification_id))
+    if not specification:
+        return error_response(404, "SPECIFICATION_NOT_FOUND", "Спецификация не найдена")
+
+    editable = {
+        "brand": specification.get("brand"),
+        "model": specification.get("model"),
+        "year": specification.get("year"),
+        "eng_capacity": specification.get("eng_capacity"),
+        "eng_type": specification.get("eng_type"),
+        "drive": specification.get("drive"),
+        "transmission": specification.get("transmission"),
+        "color": specification.get("color"),
+        "complectation": specification.get("complectation"),
+        "mileage": specification.get("mileage"),
+        "price": specification.get("price"),
+    }
+    has_estimate = bool(await database.get_estimate_by_specification_id(int(specification_id)))
+
+    return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "specification_id": specification_id, "values": editable, "price_currency": specification.get("price_currency") or "CNY", "has_estimate": has_estimate})
+
+
+@router.put("/api/specifications")
+async def update_specification_api(
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+) -> JSONResponse:
+    try:
+        form = SpecificationEditFormIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(422, "VALIDATION_ERROR", "Проверьте заполнение формы", extra={"fields": field_errors})
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        context = verify_specification_edit_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    customer = await database.get_customer_by_id(int(context.customer_id))
+    if not customer:
+        return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+    specification_id = customer.get("specification_id")
+    if not specification_id:
+        return error_response(404, "SPECIFICATION_NOT_FOUND", "У клиента нет спецификации")
+    specification = await database.get_specification_by_id(int(specification_id))
+    if not specification:
+        return error_response(404, "SPECIFICATION_NOT_FOUND", "Спецификация не найдена")
+
+    # prepare new fields
+    new_fields = form.to_database_fields()
+    # remove any keys not in updatable set (to_database_fields returns all)
+    updatable = {k: v for k, v in new_fields.items() if k in database._SPECIFICATION_UPDATABLE_FIELDS}
+
+    # detect changes
+    changed = {}
+    for k, v in updatable.items():
+        old = specification.get(k)
+        # compare as strings (DB stores as text)
+        old_s = "" if old is None else str(old)
+        new_s = "" if v is None else str(v)
+        if old_s != new_s:
+            changed[k] = v
+
+    has_estimate = bool(await database.get_estimate_by_specification_id(int(specification_id)))
+    if changed and has_estimate and not getattr(form, "confirm_estimate_reset", False):
+        return error_response(409, "ESTIMATE_RECALCULATION_REQUIRED", "После изменения спецификации существующую смету потребуется пересоздать.")
+
+    try:
+        if changed and has_estimate and getattr(form, "confirm_estimate_reset", False):
+            updated = await database.update_specification_and_reset_estimate(int(specification_id), changed)
+            estimate_reset = True
+        elif changed:
+            updated = await database.update_specification_fields(int(specification_id), changed)
+            estimate_reset = False
+        else:
+            return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "specification_id": specification_id, "estimate_reset": False, "message": "Изменений нет"})
+    except Exception:
+        logger.exception("Failed to update specification specification_id=%s", specification_id)
+        return error_response(500, "SPEC_UPDATE_ERROR", "Не удалось обновить спецификацию")
+
+    # notify user (no blocking)
+    try:
+        # fetch updated customer
+        customer = await database.get_customer_by_id(int(context.customer_id))
+        # send Telegram messages via bot is not available here; controller that opened miniapp should handle notifying.
+        pass
+    except Exception:
+        logger.exception("Failed to notify user after spec update")
+
+    return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "specification_id": specification_id, "estimate_reset": estimate_reset, "message": "Спецификация обновлена"})
 
 
 @router.post("/api/estimates")

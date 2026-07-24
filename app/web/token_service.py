@@ -12,6 +12,7 @@ from typing import Any
 
 PURPOSE_CREATE_SPECIFICATION = "create_specification"
 PURPOSE_CREATE_ESTIMATE = "create_estimate"
+PURPOSE_EDIT_SPECIFICATION = "edit_specification"
 
 
 class TokenError(Exception):
@@ -89,6 +90,30 @@ def create_estimate_context_token(
     return _sign_payload(payload.to_payload(), secret)
 
 
+def create_specification_edit_context_token(
+    *,
+    secret: str,
+    customer_id: int,
+    telegram_user_id: int,
+    origin_chat_id: int,
+    ttl_seconds: int,
+    now: int | None = None,
+) -> str:
+    if ttl_seconds <= 0:
+        raise ValueError("ttl_seconds must be positive")
+
+    current_time = int(time.time() if now is None else now)
+    payload = SpecificationContextToken(
+        purpose=PURPOSE_EDIT_SPECIFICATION,
+        customer_id=int(customer_id),
+        telegram_user_id=int(telegram_user_id),
+        origin_chat_id=int(origin_chat_id),
+        exp=current_time + int(ttl_seconds),
+        nonce=secrets.token_urlsafe(16),
+    )
+    return _sign_payload(payload.to_payload(), secret)
+
+
 def verify_specification_context_token(
     token: str,
     *,
@@ -118,6 +143,22 @@ def verify_estimate_context_token(
         expected_telegram_user_id=expected_telegram_user_id,
         now=now,
         expected_purpose=PURPOSE_CREATE_ESTIMATE,
+    )
+
+
+def verify_specification_edit_context_token(
+    token: str,
+    *,
+    secret: str,
+    expected_telegram_user_id: int | None = None,
+    now: int | None = None,
+) -> SpecificationContextToken:
+    return _verify_context_token(
+        token,
+        secret=secret,
+        expected_telegram_user_id=expected_telegram_user_id,
+        now=now,
+        expected_purpose=PURPOSE_EDIT_SPECIFICATION,
     )
 
 

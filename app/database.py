@@ -1190,6 +1190,75 @@ class Database:
             )
             return _record_to_dict(row)
 
+    async def update_specification_fields(
+        self,
+        specification_id: int,
+        fields: dict[str, str | int | None],
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        if not fields:
+            raise ValueError("No fields to update")
+
+        unknown = set(fields) - self._SPECIFICATION_UPDATABLE_FIELDS
+        if unknown:
+            raise ValueError(f"Fields are not updatable: {', '.join(sorted(unknown))}")
+
+        assignments = []
+        values: list[object] = [specification_id]
+        for index, (field_name, value) in enumerate(fields.items(), start=2):
+            assignments.append(f"{field_name} = ${index}")
+            values.append(value)
+        values.append(datetime.now(timezone.utc))
+        updated_at_index = len(values)
+
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"""
+                UPDATE specifications
+                SET {', '.join(assignments)}, updated_at = ${updated_at_index}
+                WHERE id = $1
+                RETURNING *;
+                """,
+                *values,
+            )
+            return _record_to_dict(row)
+
+    async def update_specification_and_reset_estimate(
+        self,
+        specification_id: int,
+        fields: dict[str, str | int | None],
+    ) -> dict:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        unknown = set(fields) - self._SPECIFICATION_UPDATABLE_FIELDS
+        if unknown:
+            raise ValueError(f"Fields are not updatable: {', '.join(sorted(unknown))}")
+
+        assignments = []
+        values: list[object] = [specification_id]
+        for index, (field_name, value) in enumerate(fields.items(), start=2):
+            assignments.append(f"{field_name} = ${index}")
+            values.append(value)
+        values.append(datetime.now(timezone.utc))
+        updated_at_index = len(values)
+
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    "DELETE FROM estimates WHERE specification_id = $1;", specification_id
+                )
+                row = await connection.fetchrow(
+                    f"""
+                    UPDATE specifications
+                    SET {', '.join(assignments)}, updated_at = ${updated_at_index}
+                    WHERE id = $1
+                    RETURNING *;
+                    """,
+                    *values,
+                )
+                return _record_to_dict(row)
+
     async def delete_specification(self, specification_id: int) -> bool:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")

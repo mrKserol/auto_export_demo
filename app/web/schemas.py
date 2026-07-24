@@ -154,6 +154,27 @@ class SpecificationFormIn(BaseModel):
         }
 
 
+class SpecificationEditContextIn(BaseModel):
+    context_token: str
+    telegram_init_data: str
+
+    @field_validator("context_token", "telegram_init_data", mode="before")
+    @classmethod
+    def strip_strings(cls, v):
+        return (v or "").strip()
+
+
+class SpecificationEditFormIn(SpecificationFormIn):
+    context_token: str
+    telegram_init_data: str
+    confirm_estimate_reset: bool = False
+
+    @field_validator("context_token", "telegram_init_data", mode="before")
+    @classmethod
+    def strip_strings2(cls, v):
+        return (v or "").strip()
+
+
 class EstimateFormIn(BaseModel):
     engine_power: Decimal
     exchange_rate: Decimal

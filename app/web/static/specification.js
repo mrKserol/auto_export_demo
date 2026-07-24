@@ -20,6 +20,48 @@
     }
   }
 
+  // detect edit mode and prefill via API
+  const urlParams = new URLSearchParams(window.location.search);
+  const mode = urlParams.get("mode");
+  const contextToken = getContextToken();
+  async function loadEditContext() {
+    if (mode !== "edit") return;
+    // change UI texts
+    const title = document.querySelector(".header h1");
+    const subtitle = document.querySelector(".header .subtitle");
+    if (title) title.textContent = "Изменить спецификацию";
+    if (subtitle) subtitle.textContent = "Проверьте данные автомобиля и внесите изменения";
+    if (tg && tg.MainButton) tg.MainButton.setText("Сохранить изменения");
+
+    setLoading(true);
+    try {
+      const response = await fetch("/api/specifications/edit-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          context_token: contextToken,
+          telegram_init_data: tg ? tg.initData || "" : "",
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        showFormError(data.error?.message || "Не удалось загрузить спецификацию для редактирования");
+        return;
+      }
+      const values = data.values || {};
+      // fill inputs
+      Object.entries(values).forEach(([k, v]) => {
+        const input = form.querySelector(`[name="${k}"]`);
+        if (input && v !== null && v !== undefined) input.value = v;
+      });
+    } catch (e) {
+      showFormError("Ошибка сети при загрузке спецификации.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  loadEditContext();
+
   function getContextToken() {
     const params = new URLSearchParams(window.location.search);
     return (params.get("token") || "").trim();
@@ -150,8 +192,10 @@
 
     setLoading(true);
     try {
-      const response = await fetch("/api/specifications", {
-        method: "POST",
+      const endpoint = mode === "edit" ? "/api/specifications" : "/api/specifications";
+      const method = mode === "edit" ? "PUT" : "POST";
+      const response = await fetch(endpoint, {
+        method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
