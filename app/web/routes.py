@@ -366,7 +366,36 @@ async def update_specification_api(
     except Exception:
         logger.exception("Failed to notify user after spec update")
 
-    return JSONResponse(status_code=200, content={"ok": True, "customer_id": context.customer_id, "specification_id": specification_id, "estimate_reset": estimate_reset, "message": "Спецификация обновлена"})
+    # fetch updated data to return to miniapp for user feedback
+    try:
+        updated_customer = await database.get_customer_by_id(int(context.customer_id))
+        updated_spec = await database.get_specification_by_id(int(specification_id))
+        from app.services.customer_card_service import build_customer_card
+        customer_card = await build_customer_card(updated_customer, database)
+        from app.services.specification_edit_service import format_specification_text
+        specification_text = format_specification_text(updated_spec) if updated_spec else ""
+    except Exception:
+        logger.exception("Failed to build user-facing messages after spec update")
+        customer_card = ""
+        specification_text = ""
+
+    extra_msg = ""
+    if estimate_reset:
+        extra_msg = "⚠️ Предыдущая смета удалена, так как данные автомобиля изменились. Создайте новую смету."
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "customer_id": context.customer_id,
+            "specification_id": specification_id,
+            "estimate_reset": estimate_reset,
+            "message": "Спецификация обновлена",
+            "customer_card": customer_card,
+            "specification_text": specification_text,
+            "extra_message": extra_msg,
+        },
+    )
 
 
 @router.post("/api/estimates")

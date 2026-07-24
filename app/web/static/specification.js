@@ -221,13 +221,28 @@
       }
 
       formSuccess.hidden = false;
-      formSuccess.textContent = data.message || "Спецификация сохранена";
+      // show message and updated data returned from backend
+      const messageLines = [];
+      messageLines.push(data.message || "Спецификация сохранена");
+      if (data.extra_message) messageLines.push(data.extra_message);
+      if (data.specification_text) {
+        messageLines.push("");
+        messageLines.push("Обновлённая спецификация:");
+        messageLines.push(data.specification_text);
+      }
+      if (data.customer_card) {
+        messageLines.push("");
+        messageLines.push("Карта клиента:");
+        messageLines.push(data.customer_card);
+      }
+      formSuccess.textContent = messageLines.join("\n");
       haptic("success");
+      // give user longer time to read before closing
       setTimeout(() => {
         if (tg && typeof tg.close === "function") {
           tg.close();
         }
-      }, 900);
+      }, 2200);
     } catch (_error) {
       showFormError("Сеть недоступна. Попробуйте ещё раз.");
       haptic("error");
