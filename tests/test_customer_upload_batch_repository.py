@@ -361,6 +361,35 @@ class CustomerUploadBatchRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(with_path["customer_path"], "/Clients/Petrov_9999")
 
+    async def test_delete_customer_clears_batch_customer_id(self) -> None:
+        customer = await self.db.create_customer(
+            {
+                "passport": f"DEL-{uuid.uuid4().hex[:8]}",
+                "first_name": "Ivan",
+                "last_name": "Ivanov",
+                "customer_path": "/Clients/Ivanov_1",
+            }
+        )
+        batch = await self.repo.create_batch(
+            batch_key=f"del-{uuid.uuid4().hex}",
+            telegram_chat_id=1,
+            telegram_user_id=2,
+        )
+        await self.repo.mark_batch_customer_saved(
+            batch["id"],
+            customer_id=int(customer["id"]),
+        )
+        deleted = await self.db.delete_customer_with_related_data(int(customer["id"]))
+        self.assertTrue(deleted)
+        self.assertIsNone(await self.db.get_customer_by_id(int(customer["id"])))
+        refreshed = await self.repo.get_batch_by_id(batch["id"])
+        self.assertIsNotNone(refreshed)
+        self.assertIsNone(refreshed["customer_id"])
+        self.assertEqual(
+            refreshed["status"],
+            CustomerUploadBatchStatus.CUSTOMER_SAVED,
+        )
+
 
 class CustomerUploadBatchSqlConstantsTests(unittest.TestCase):
     def test_sql_constants_define_required_objects(self) -> None:

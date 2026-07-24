@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS customer_upload_batches (
     media_group_id TEXT,
     status TEXT NOT NULL DEFAULT 'collecting',
     customer_path TEXT,
-    customer_id BIGINT REFERENCES customers(id),
+    customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL,
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -284,7 +284,26 @@ ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL = [
     """
     ALTER TABLE customer_upload_batches
     ADD COLUMN IF NOT EXISTS customer_id BIGINT
-    REFERENCES customers(id);
+    REFERENCES customers(id) ON DELETE SET NULL;
+    """,
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'customer_upload_batches_customer_id_fkey'
+        ) THEN
+            ALTER TABLE customer_upload_batches
+            DROP CONSTRAINT customer_upload_batches_customer_id_fkey;
+        END IF;
+
+        ALTER TABLE customer_upload_batches
+        ADD CONSTRAINT customer_upload_batches_customer_id_fkey
+        FOREIGN KEY (customer_id)
+        REFERENCES customers(id)
+        ON DELETE SET NULL;
+    END $$;
     """,
 ]
 
@@ -1073,6 +1092,8 @@ class Database:
                 if int(contract_count) > 0:
                     return False
 
+                await self._detach_customer_references(connection, customer_id)
+
                 result = await connection.execute(
                     "DELETE FROM customers WHERE id = $1;",
                     customer_id,
@@ -1114,10 +1135,7 @@ class Database:
                         specification_id,
                     )
 
-                await connection.execute(
-                    "UPDATE contracts SET customer_id = NULL WHERE customer_id = $1;",
-                    customer_id,
-                )
+                await self._detach_customer_references(connection, customer_id)
 
                 result = await connection.execute(
                     "DELETE FROM customers WHERE id = $1;",
@@ -1133,6 +1151,29 @@ class Database:
                     )
 
                 return True
+
+    @staticmethod
+    async def _detach_customer_references(connection, customer_id: int) -> None:
+        """Clear FK/references so customers row can be deleted.
+
+        Does not touch Yandex Disk resources.
+        """
+        await connection.execute(
+            "UPDATE contracts SET customer_id = NULL WHERE customer_id = $1;",
+            customer_id,
+        )
+        await connection.execute(
+            """
+            UPDATE customer_upload_batches
+            SET customer_id = NULL
+            WHERE customer_id = $1;
+            """,
+            customer_id,
+        )
+        await connection.execute(
+            "DELETE FROM mini_app_launch_codes WHERE customer_id = $1;",
+            customer_id,
+        )
 
     async def create_mini_app_launch_code(
         self,
