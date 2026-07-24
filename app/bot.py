@@ -101,21 +101,6 @@ async def run_application(settings: Settings) -> None:
         gpt_service=yandex_gpt_service,
     )
 
-    fastapi_app = create_fastapi_app(
-        settings=settings,
-        database=database,
-        bot=bot,
-        yandex_disk_client=yandex_disk_client,
-    )
-    uvicorn_config = uvicorn.Config(
-        fastapi_app,
-        host=settings.web_host,
-        port=settings.web_port,
-        log_level="info",
-        loop="asyncio",
-    )
-    web_server = uvicorn.Server(uvicorn_config)
-
     await database.connect()
     await yandex_disk_client.ensure_base_path()
     customer_upload_batch_repository = CustomerUploadBatchRepository(database.pool)
@@ -127,6 +112,23 @@ async def run_application(settings: Settings) -> None:
         repository=customer_upload_batch_repository,
         yandex_disk_client=yandex_disk_client,
     )
+
+    fastapi_app = create_fastapi_app(
+        settings=settings,
+        database=database,
+        bot=bot,
+        yandex_disk_client=yandex_disk_client,
+        customer_batch_recognition_service=customer_batch_recognition_service,
+        customer_folder_service=customer_folder_service,
+    )
+    uvicorn_config = uvicorn.Config(
+        fastapi_app,
+        host=settings.web_host,
+        port=settings.web_port,
+        log_level="info",
+        loop="asyncio",
+    )
+    web_server = uvicorn.Server(uvicorn_config)
 
     polling_task = asyncio.create_task(
         dispatcher.start_polling(

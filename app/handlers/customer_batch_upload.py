@@ -98,6 +98,7 @@ async def handle_add_customer_batch(
             batch_key=f"tg-{chat_id}-{user_id}-{uuid.uuid4().hex}",
             telegram_chat_id=chat_id,
             telegram_user_id=user_id,
+            origin="telegram",
         )
         logger.info(
             "customer batch created batch_id=%s telegram_chat_id=%s "

@@ -43,6 +43,7 @@ class CustomerUploadBatchRepository:
         telegram_user_id: int | None = None,
         media_group_id: str | None = None,
         status: str = CustomerUploadBatchStatus.COLLECTING,
+        origin: str | None = None,
     ) -> dict:
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
@@ -52,8 +53,9 @@ class CustomerUploadBatchRepository:
                     telegram_chat_id,
                     telegram_user_id,
                     media_group_id,
-                    status
-                ) VALUES ($1, $2, $3, $4, $5)
+                    status,
+                    origin
+                ) VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING *;
                 """,
                 batch_key,
@@ -61,6 +63,7 @@ class CustomerUploadBatchRepository:
                 telegram_user_id,
                 media_group_id,
                 status,
+                origin,
             )
             result = _record_to_dict(row)
             assert result is not None
@@ -103,6 +106,58 @@ class CustomerUploadBatchRepository:
                 list(CustomerUploadBatchStatus.ACTIVE),
             )
             return _record_to_dict(row)
+
+    async def get_active_batch_for_user(
+        self,
+        user_id: int,
+        *,
+        origin: str | None = None,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            if origin is None:
+                row = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM customer_upload_batches
+                    WHERE telegram_user_id = $1
+                      AND status = ANY($2::text[])
+                    ORDER BY id DESC
+                    LIMIT 1;
+                    """,
+                    user_id,
+                    list(CustomerUploadBatchStatus.ACTIVE),
+                )
+            else:
+                row = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM customer_upload_batches
+                    WHERE telegram_user_id = $1
+                      AND origin = $2
+                      AND status = ANY($3::text[])
+                    ORDER BY id DESC
+                    LIMIT 1;
+                    """,
+                    user_id,
+                    origin,
+                    list(CustomerUploadBatchStatus.ACTIVE),
+                )
+            return _record_to_dict(row)
+
+    async def list_active_batches_for_user(self, user_id: int) -> list[dict]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT *
+                FROM customer_upload_batches
+                WHERE telegram_user_id = $1
+                  AND status = ANY($2::text[])
+                ORDER BY id DESC;
+                """,
+                user_id,
+                list(CustomerUploadBatchStatus.ACTIVE),
+            )
+            return [_record_to_dict(row) for row in rows if row is not None]
 
     async def get_resumable_batch(
         self,
@@ -160,6 +215,7 @@ class CustomerUploadBatchRepository:
         file_extension: str | None = None,
         file_size: int | None = None,
         temporary_content: bytes | None = None,
+        declared_document_type: str | None = None,
     ) -> dict:
         async with self._pool.acquire() as connection:
             if telegram_message_id is not None:
@@ -173,8 +229,9 @@ class CustomerUploadBatchRepository:
                         mime_type,
                         file_extension,
                         file_size,
-                        temporary_content
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        temporary_content,
+                        declared_document_type
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT (batch_id, telegram_message_id) DO NOTHING
                     RETURNING *;
                     """,
@@ -186,6 +243,7 @@ class CustomerUploadBatchRepository:
                     file_extension,
                     file_size,
                     temporary_content,
+                    declared_document_type,
                 )
                 if row is None:
                     row = await connection.fetchrow(
@@ -209,8 +267,9 @@ class CustomerUploadBatchRepository:
                         mime_type,
                         file_extension,
                         file_size,
-                        temporary_content
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        temporary_content,
+                        declared_document_type
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING *;
                     """,
                     batch_id,
@@ -221,11 +280,44 @@ class CustomerUploadBatchRepository:
                     file_extension,
                     file_size,
                     temporary_content,
+                    declared_document_type,
                 )
 
             result = _normalize_file_record(row)
             assert result is not None
             return result
+
+    async def delete_batch_file(self, batch_id: int, file_id: int) -> bool:
+        async with self._pool.acquire() as connection:
+            result = await connection.execute(
+                """
+                DELETE FROM customer_upload_batch_files
+                WHERE batch_id = $1 AND id = $2;
+                """,
+                batch_id,
+                file_id,
+            )
+            return result.endswith("1")
+
+    async def get_batch_file_by_declared_type(
+        self,
+        batch_id: int,
+        declared_document_type: str,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM customer_upload_batch_files
+                WHERE batch_id = $1
+                  AND declared_document_type = $2
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                batch_id,
+                declared_document_type,
+            )
+            return _normalize_file_record(row)
 
     async def get_batch_files(self, batch_id: int) -> list[dict]:
         async with self._pool.acquire() as connection:

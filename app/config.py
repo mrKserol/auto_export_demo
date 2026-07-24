@@ -21,6 +21,8 @@ class Settings:
     mini_app_token_ttl_seconds: int
     telegram_init_data_max_age_seconds: int
     customer_upload_max_file_bytes: int = 20 * 1024 * 1024
+    telegram_bot_username: str | None = None
+    miniapp_test_mode: bool = False
     app_commit_sha: str | None = None
 
 
@@ -117,5 +119,9 @@ def load_settings() -> Settings:
             "CUSTOMER_UPLOAD_MAX_FILE_BYTES",
             20 * 1024 * 1024,
         ),
+        telegram_bot_username=(
+            (os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@") or None
+        ),
+        miniapp_test_mode=_parse_bool_env("MINIAPP_TEST_MODE", default=False),
         app_commit_sha=resolve_app_commit_sha(),
     )

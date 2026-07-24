@@ -23,6 +23,7 @@
   ];
 
   function getContextToken(){ const params=new URLSearchParams(window.location.search); return (params.get("token")||"").trim(); }
+  function fromMiniApp(){ const params=new URLSearchParams(window.location.search); return params.get("from")==="miniapp"; }
   function clearMessages(){ if(formError) formError.hidden=true; if(formSuccess) formSuccess.hidden=true; if(formWarnings) formWarnings.hidden=true; }
   function showError(msg){ if(formError){ formError.hidden=false; formError.textContent=msg; } }
   function showSuccess(msg){ if(formSuccess){ formSuccess.hidden=false; formSuccess.textContent=msg; } }
@@ -291,6 +292,54 @@
       try {
         if (isTelegram && tg && typeof tg.HapticFeedback !== "undefined") tg.HapticFeedback.notificationOccurred("success");
       } catch (_e) {}
+      if (fromMiniApp()) {
+        const actions = document.getElementById("post-save-actions");
+        const customerId = data.customer_id;
+        if (actions) {
+          actions.hidden = false;
+          let html = "<p><strong>Клиент сохранён</strong></p><div style=\"display:grid;gap:10px;margin-top:10px\">";
+          if (customerId) {
+            html += '<button type="button" class="fallback-submit" style="position:static" id="open-saved-card">Открыть карточку клиента</button>';
+            html += '<button type="button" class="fallback-submit" style="position:static;background:#2481cc" id="open-saved-spec">Добавить спецификацию</button>';
+          }
+          html += '<a class="fallback-submit" style="position:static;background:#555;text-align:center;text-decoration:none" href="/miniapp">На главную</a></div>';
+          actions.innerHTML = html;
+          const cardBtn = document.getElementById("open-saved-card");
+          if (cardBtn) {
+            cardBtn.addEventListener("click", function () {
+              try { sessionStorage.setItem("miniapp_open_customer_id", String(customerId)); } catch (_e) {}
+              window.location.href = "/miniapp/customer/search";
+            });
+          }
+          const specBtn = document.getElementById("open-saved-spec");
+          if (specBtn) {
+            specBtn.addEventListener("click", async function () {
+              try {
+                const res = await fetch("/api/miniapp/specification-token", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    telegram_init_data: tg ? tg.initData || "" : "",
+                    customer_id: Number(customerId),
+                  }),
+                });
+                const payload = await res.json().catch(function () { return {}; });
+                if (!res.ok || !payload.ok) {
+                  showError((payload.error && payload.error.message) || "Не удалось открыть спецификацию");
+                  return;
+                }
+                window.location.href = payload.url;
+              } catch (_e) {
+                showError("Ошибка сети");
+              }
+            });
+          }
+        }
+        if (isTelegram && tg && tg.MainButton) {
+          try { tg.MainButton.hide(); } catch (_e) {}
+        }
+        return;
+      }
       setTimeout(() => {
         try { if (isTelegram && tg && typeof tg.close === "function") tg.close(); } catch (_){}
       }, 1200);

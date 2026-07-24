@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS customer_upload_batches (
     telegram_user_id BIGINT,
     media_group_id TEXT,
     status TEXT NOT NULL DEFAULT 'collecting',
+    origin TEXT,
     customer_path TEXT,
     customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL,
     error_message TEXT,
@@ -143,6 +144,7 @@ CREATE TABLE IF NOT EXISTS customer_upload_batch_files (
     file_extension TEXT,
     file_size BIGINT,
     temporary_content BYTEA,
+    declared_document_type TEXT,
     detected_document_type TEXT,
     recognition_status TEXT NOT NULL DEFAULT 'pending',
     extracted_json JSONB,
@@ -310,6 +312,11 @@ ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL = [
         REFERENCES customers(id)
         ON DELETE SET NULL;
     END $$;
+    """,
+    "ALTER TABLE customer_upload_batches ADD COLUMN IF NOT EXISTS origin TEXT;",
+    """
+    ALTER TABLE customer_upload_batch_files
+    ADD COLUMN IF NOT EXISTS declared_document_type TEXT;
     """,
 ]
 
