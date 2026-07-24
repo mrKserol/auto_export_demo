@@ -150,8 +150,14 @@ async def handle_estimate_form(callback: CallbackQuery, database: Database, bot:
     url = build_estimate_miniapp_url(settings, token)
     logger.info("Estimate form callback customer_id=%s telegram_user_id=%s", customer_id, callback.from_user.id)
     if callback.message.chat.type == "private":
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]])
-        await callback.message.answer("Откройте форму сметы:", reply_markup=kb)
+        # Open Web App immediately for the user who clicked the callback
+        try:
+            await callback.answer(url=url)
+            return
+        except Exception:
+            # Fall back to sending a clickable button if direct open fails
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]])
+            await callback.message.answer("Откройте форму сметы:", reply_markup=kb)
     else:
         me = await bot.get_me()
         bot_username = me.username or ""

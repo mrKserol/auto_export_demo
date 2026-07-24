@@ -27,7 +27,7 @@
       <label class="field"><span>Таможенная очистка</span><input type="number" name="custom_clearing" min="0" step="0.01" placeholder="65000" required /><span class="currency">RUB</span><small data-error-for="custom_clearing" class="field-error"></small></label>
       <label class="field"><span>Комиссия исполнителя</span><input type="number" name="contractor_comission" min="0" step="0.01" placeholder="150000" required /><span class="currency">RUB</span><small data-error-for="contractor_comission" class="field-error"></small></label>
 
-      <button type="submit" id="fallback-submit" class="fallback-submit">Создать смету</button>
+      <!-- Main action is provided by Telegram WebApp MainButton; keep no in-form submit to avoid duplication -->
     </form>
   </main>
   <script src="/static/estimate.js?v=2" defer></script>

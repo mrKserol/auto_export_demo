@@ -38,7 +38,7 @@
 
   function setLoading(isLoading) {
     submitting = isLoading;
-    fallbackSubmit.disabled = isLoading;
+    if (fallbackSubmit) fallbackSubmit.disabled = isLoading;
     if (tg && tg.MainButton) {
       if (isLoading) { tg.MainButton.showProgress(); tg.MainButton.disable(); }
       else { tg.MainButton.hideProgress(); tg.MainButton.enable(); }
