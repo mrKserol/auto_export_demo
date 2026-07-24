@@ -5,6 +5,7 @@ import uuid
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.enums import ChatAction
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -20,6 +21,9 @@ from app.repositories.customer_upload_batch_repository import (
 )
 from app.repositories.customer_upload_batch_statuses import (
     CustomerUploadBatchStatus,
+)
+from app.services.customer_batch_recognition_service import (
+    CustomerBatchRecognitionService,
 )
 from app.services.customer_file_download_service import (
     CustomerFileDownloadError,
@@ -133,10 +137,13 @@ async def handle_batch_document_restore(
 
 
 @router.callback_query(F.data == "customer_batch:process")
+@router.callback_query(F.data == "customer_batch:retry_recognition")
 async def handle_batch_process(
     callback: CallbackQuery,
     state: FSMContext,
+    bot: Bot,
     customer_upload_batch_repository: CustomerUploadBatchRepository,
+    customer_batch_recognition_service: CustomerBatchRecognitionService,
 ) -> None:
     if callback.message is None or callback.from_user is None:
         await callback.answer()
@@ -155,44 +162,80 @@ async def handle_batch_process(
         await callback.answer()
         return
 
-    if batch["status"] != CustomerUploadBatchStatus.COLLECTING:
+    status = batch["status"]
+    if status == CustomerUploadBatchStatus.ABANDONED:
+        await callback.message.answer("Загрузка клиента отменена.")
+        await callback.answer()
+        return
+
+    if status in {
+        CustomerUploadBatchStatus.RECOGNIZED,
+        CustomerUploadBatchStatus.CREATING_FOLDER,
+        CustomerUploadBatchStatus.UPLOADING,
+        CustomerUploadBatchStatus.FILES_SAVED,
+        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
+        CustomerUploadBatchStatus.CUSTOMER_SAVED,
+    }:
         await callback.message.answer("Этот пакет уже передан в обработку.")
         await callback.answer()
         return
 
     file_count = await customer_upload_batch_repository.count_batch_files(batch["id"])
-    if file_count < REQUIRED_DOCUMENTS_COUNT:
+    if (
+        status == CustomerUploadBatchStatus.COLLECTING
+        and file_count < REQUIRED_DOCUMENTS_COUNT
+    ):
         await callback.message.answer(
             _format_insufficient_files_message(file_count)
         )
         await callback.answer()
         return
 
-    claimed = await customer_upload_batch_repository.claim_batch_for_processing(
-        batch["id"]
-    )
-    if claimed is None:
-        await callback.message.answer("Этот пакет уже передан в обработку.")
-        await callback.answer()
-        return
-
     await state.set_state(CustomerBatchUploadStates.processing_documents)
-    await state.update_data(batch_id=claimed["id"])
-    logger.info(
-        "customer batch submitted for processing batch_id=%s telegram_chat_id=%s "
-        "telegram_user_id=%s media_group_id=%s file_count=%s",
-        claimed["id"],
-        claimed.get("telegram_chat_id"),
-        claimed.get("telegram_user_id"),
-        claimed.get("media_group_id"),
-        file_count,
-    )
+    await state.update_data(batch_id=batch["id"])
     await callback.message.answer(
-        "Пакет документов собран.\n\n"
+        "Распознаю документы.\n"
         f"Получено файлов: {file_count}\n\n"
-        "Следующим этапом будет распознавание документов."
+        "Это может занять некоторое время."
     )
     await callback.answer()
+
+    logger.info(
+        "customer batch submitted for processing batch_id=%s telegram_chat_id=%s "
+        "telegram_user_id=%s media_group_id=%s file_count=%s status=%s",
+        batch["id"],
+        batch.get("telegram_chat_id"),
+        batch.get("telegram_user_id"),
+        batch.get("media_group_id"),
+        file_count,
+        status,
+    )
+
+    chat_id = callback.message.chat.id
+    try:
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        result = await customer_batch_recognition_service.process_batch(batch["id"])
+        await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    except Exception:
+        logger.exception(
+            "customer batch recognition handler failed batch_id=%s",
+            batch["id"],
+        )
+        await callback.message.answer(
+            "Не удалось завершить распознавание документов.\n\n"
+            "Полученные файлы сохранены. Попробуйте запустить обработку повторно.",
+            reply_markup=_recognition_retry_keyboard(),
+        )
+        return
+
+    reply_markup = None
+    if result.is_technical_failure or not result.kit.is_complete:
+        reply_markup = _recognition_retry_keyboard()
+
+    await callback.message.answer(
+        result.telegram_message,
+        reply_markup=reply_markup,
+    )
 
 
 @router.callback_query(F.data == "customer_batch:cancel")
@@ -354,7 +397,7 @@ async def _resolve_batch_for_callback(
     if callback.message is None or callback.from_user is None:
         return None
 
-    return await repository.get_active_batch(
+    return await repository.get_resumable_batch(
         callback.message.chat.id,
         callback.from_user.id,
     )
@@ -380,6 +423,19 @@ def _batch_keyboard(file_count: int) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _recognition_retry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Повторить распознавание",
+                    callback_data="customer_batch:retry_recognition",
+                )
+            ]
+        ]
+    )
 
 
 def _format_file_accepted_message(file_count: int) -> str:

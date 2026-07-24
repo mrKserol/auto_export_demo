@@ -31,6 +31,12 @@ from app.services.customer_file_download_service import (
     CustomerFileDownloadError,
     download_customer_file_from_telegram,
 )
+from app.services.customer_batch_recognition_service import (
+    CustomerBatchRecognitionService,
+)
+from app.services.customer_document_recognition_service import (
+    CustomerDocumentRecognitionResult,
+)
 from app.states.customer_states import CustomerAddStates, CustomerBatchUploadStates
 from tests.postgres_test_utils import (
     ensure_postgres_on_path,
@@ -436,10 +442,18 @@ class CustomerBatchUploadFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.repo,
             )
         callback = _callback()
-        await handle_batch_process(callback, state, self.repo)
+        recognition_service = AsyncMock()
+        await handle_batch_process(
+            callback,
+            state,
+            AsyncMock(),
+            self.repo,
+            recognition_service,
+        )
         self.assertIn("Загружено только 3", callback.message.answer.await_args.args[0])
         batch = await self.repo.get_batch_by_id(state._data["batch_id"])
         self.assertEqual(batch["status"], CustomerUploadBatchStatus.COLLECTING)
+        recognition_service.process_batch.assert_not_awaited()
 
     async def test_process_claims_batch_once(self) -> None:
         state = _mock_state()
@@ -453,16 +467,74 @@ class CustomerBatchUploadFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.repo,
             )
         callback = _callback()
-        await handle_batch_process(callback, state, self.repo)
-        batch = await self.repo.get_batch_by_id(state._data["batch_id"])
-        self.assertEqual(batch["status"], CustomerUploadBatchStatus.RECOGNIZING)
-        self.assertIn(
-            "Следующим этапом будет распознавание",
-            callback.message.answer.await_args.args[0],
+        recognition_service = CustomerBatchRecognitionService(
+            repository=self.repo,
+            recognition_service=AsyncMock(
+                recognize_document=AsyncMock(
+                    side_effect=[
+                        CustomerDocumentRecognitionResult(
+                            document_type="passport_main",
+                            confidence=0.9,
+                            ocr_text="x",
+                            extracted_fields={
+                                "last_name": "Ivanov",
+                                "first_name": "Ivan",
+                                "passport": "1",
+                            },
+                            warnings=[],
+                        ),
+                        CustomerDocumentRecognitionResult(
+                            document_type="passport_registration",
+                            confidence=0.9,
+                            ocr_text="x",
+                            extracted_fields={},
+                            warnings=[],
+                        ),
+                        CustomerDocumentRecognitionResult(
+                            document_type="snils",
+                            confidence=0.9,
+                            ocr_text="x",
+                            extracted_fields={
+                                "last_name": "Ivanov",
+                                "first_name": "Ivan",
+                            },
+                            warnings=[],
+                        ),
+                        CustomerDocumentRecognitionResult(
+                            document_type="tin",
+                            confidence=0.9,
+                            ocr_text="x",
+                            extracted_fields={
+                                "last_name": "Ivanov",
+                                "first_name": "Ivan",
+                            },
+                            warnings=[],
+                        ),
+                    ]
+                )
+            ),
         )
+        await handle_batch_process(
+            callback,
+            state,
+            AsyncMock(),
+            self.repo,
+            recognition_service,
+        )
+        batch = await self.repo.get_batch_by_id(state._data["batch_id"])
+        self.assertEqual(batch["status"], CustomerUploadBatchStatus.RECOGNIZED)
+        texts = [call.args[0] for call in callback.message.answer.await_args_list]
+        self.assertTrue(any("Распознаю документы" in text for text in texts))
+        self.assertTrue(any("Данные готовы" in text for text in texts))
 
         callback.message.answer.reset_mock()
-        await handle_batch_process(callback, state, self.repo)
+        await handle_batch_process(
+            callback,
+            state,
+            AsyncMock(),
+            self.repo,
+            recognition_service,
+        )
         self.assertEqual(
             callback.message.answer.await_args.args[0],
             "Этот пакет уже передан в обработку.",

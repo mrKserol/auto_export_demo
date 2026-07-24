@@ -5,7 +5,10 @@ import json
 
 import asyncpg
 
-from app.repositories.customer_upload_batch_statuses import CustomerUploadBatchStatus
+from app.repositories.customer_upload_batch_statuses import (
+    CustomerUploadBatchFileRecognitionStatus,
+    CustomerUploadBatchStatus,
+)
 
 
 def _record_to_dict(record: asyncpg.Record | None) -> dict | None:
@@ -98,6 +101,28 @@ class CustomerUploadBatchRepository:
                 chat_id,
                 user_id,
                 list(CustomerUploadBatchStatus.ACTIVE),
+            )
+            return _record_to_dict(row)
+
+    async def get_resumable_batch(
+        self,
+        chat_id: int,
+        user_id: int | None,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM customer_upload_batches
+                WHERE telegram_chat_id = $1
+                  AND telegram_user_id IS NOT DISTINCT FROM $2
+                  AND status = ANY($3::text[])
+                ORDER BY id DESC
+                LIMIT 1;
+                """,
+                chat_id,
+                user_id,
+                list(CustomerUploadBatchStatus.RECOGNITION_RESUMABLE),
             )
             return _record_to_dict(row)
 
@@ -290,6 +315,205 @@ class CustomerUploadBatchRepository:
                 """,
                 batch_id,
                 media_group_id,
+                now,
+            )
+            result = _record_to_dict(row)
+            if result is None:
+                raise LookupError(f"customer_upload_batch id={batch_id} not found")
+            return result
+
+    async def get_files_for_recognition(self, batch_id: int) -> list[dict]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT *
+                FROM customer_upload_batch_files
+                WHERE batch_id = $1
+                  AND NOT (
+                    recognition_status = $2
+                    AND extracted_json IS NOT NULL
+                  )
+                ORDER BY id ASC;
+                """,
+                batch_id,
+                CustomerUploadBatchFileRecognitionStatus.SUCCESS,
+            )
+            return [
+                normalized
+                for row in rows
+                if (normalized := _normalize_file_record(row)) is not None
+            ]
+
+    async def mark_file_processing(self, file_id: int) -> dict:
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    recognition_status = $2,
+                    error_message = NULL,
+                    updated_at = $3
+                WHERE id = $1
+                RETURNING *;
+                """,
+                file_id,
+                CustomerUploadBatchFileRecognitionStatus.PROCESSING,
+                now,
+            )
+            result = _normalize_file_record(row)
+            if result is None:
+                raise LookupError(
+                    f"customer_upload_batch_file id={file_id} not found"
+                )
+            return result
+
+    async def mark_file_recognized(
+        self,
+        file_id: int,
+        *,
+        detected_document_type: str,
+        extracted_json: dict,
+        recognition_status: str = CustomerUploadBatchFileRecognitionStatus.SUCCESS,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        payload = json.dumps(extracted_json, ensure_ascii=False)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    detected_document_type = $2,
+                    extracted_json = $3::jsonb,
+                    recognition_status = $4,
+                    error_message = NULL,
+                    updated_at = $5
+                WHERE id = $1
+                RETURNING *;
+                """,
+                file_id,
+                detected_document_type,
+                payload,
+                recognition_status,
+                now,
+            )
+            result = _normalize_file_record(row)
+            if result is None:
+                raise LookupError(
+                    f"customer_upload_batch_file id={file_id} not found"
+                )
+            return result
+
+    async def mark_file_recognition_failed(
+        self,
+        file_id: int,
+        error_message: str,
+        *,
+        detected_document_type: str | None = None,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    recognition_status = $2,
+                    error_message = $3,
+                    detected_document_type = COALESCE($4, detected_document_type),
+                    updated_at = $5
+                WHERE id = $1
+                RETURNING *;
+                """,
+                file_id,
+                CustomerUploadBatchFileRecognitionStatus.FAILED,
+                error_message,
+                detected_document_type,
+                now,
+            )
+            result = _normalize_file_record(row)
+            if result is None:
+                raise LookupError(
+                    f"customer_upload_batch_file id={file_id} not found"
+                )
+            return result
+
+    async def reset_interrupted_processing_files(self, batch_id: int) -> int:
+        async with self._pool.acquire() as connection:
+            result = await connection.execute(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    recognition_status = $2,
+                    updated_at = NOW()
+                WHERE batch_id = $1
+                  AND recognition_status = $3;
+                """,
+                batch_id,
+                CustomerUploadBatchFileRecognitionStatus.PENDING,
+                CustomerUploadBatchFileRecognitionStatus.PROCESSING,
+            )
+            try:
+                return int(result.split()[-1])
+            except (AttributeError, IndexError, ValueError):
+                return 0
+
+    async def set_batch_recognized(
+        self,
+        batch_id: int,
+        *,
+        error_message: str | None = None,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    error_message = $3,
+                    updated_at = $4
+                WHERE id = $1
+                RETURNING *;
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.RECOGNIZED,
+                error_message,
+                now,
+            )
+            result = _record_to_dict(row)
+            if result is None:
+                raise LookupError(f"customer_upload_batch id={batch_id} not found")
+            return result
+
+    async def set_batch_error(
+        self,
+        batch_id: int,
+        error_message: str,
+        *,
+        status: str = CustomerUploadBatchStatus.FAILED,
+    ) -> dict:
+        return await self.update_batch_status(
+            batch_id,
+            status,
+            error_message=error_message,
+        )
+
+    async def mark_batch_recognizing(self, batch_id: int) -> dict:
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    error_message = NULL,
+                    updated_at = $3,
+                    processing_started_at = COALESCE(processing_started_at, $3)
+                WHERE id = $1
+                RETURNING *;
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.RECOGNIZING,
                 now,
             )
             result = _record_to_dict(row)

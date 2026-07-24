@@ -231,11 +231,115 @@ OCR текст:
 
 DOCUMENT_TYPE_GUARD_MIN_CONFIDENCE = 0.55
 
+ALLOWED_DOCUMENT_TYPES = frozenset(
+    {
+        "passport_main",
+        "passport_registration",
+        "snils",
+        "tin",
+        "mixed",
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CustomerDocumentRecognitionResult:
+    document_type: str
+    confidence: float
+    ocr_text: str
+    extracted_fields: dict
+    warnings: list[str]
+    error_message: str | None = None
+
 
 @dataclass(frozen=True)
 class CustomerDocumentRecognitionService:
     ocr_service: YandexOCRService
     gpt_service: YandexGPTService
+
+    async def recognize_document(
+        self,
+        content: bytes,
+        mime_type: str | None,
+        filename: str | None,
+    ) -> CustomerDocumentRecognitionResult:
+        """Run OCR once, classify document type, then extract fields."""
+        ocr_text = await self._run_ocr(
+            "batch_document",
+            content,
+            mime_type,
+            filename=filename,
+        )
+        if not (ocr_text or "").strip():
+            return CustomerDocumentRecognitionResult(
+                document_type="unknown",
+                confidence=0.0,
+                ocr_text="",
+                extracted_fields={},
+                warnings=["empty_ocr"],
+                error_message="OCR returned empty text",
+            )
+
+        guard = await self._detect_document_type_from_ocr(ocr_text)
+        document_type = str(guard.get("document_type") or "unknown")
+        if document_type not in ALLOWED_DOCUMENT_TYPES:
+            document_type = "unknown"
+        confidence = float(guard.get("confidence") or 0.0)
+        warnings: list[str] = []
+        reason = guard.get("reason")
+        if reason:
+            warnings.append(str(reason))
+
+        if document_type in {"mixed", "unknown"}:
+            return CustomerDocumentRecognitionResult(
+                document_type=document_type,
+                confidence=confidence,
+                ocr_text=ocr_text,
+                extracted_fields={"document_type": document_type},
+                warnings=warnings,
+                error_message=None,
+            )
+
+        extracted_fields = await self.extract_fields_from_ocr_text(
+            document_type,
+            ocr_text,
+        )
+        return CustomerDocumentRecognitionResult(
+            document_type=document_type,
+            confidence=confidence,
+            ocr_text=ocr_text,
+            extracted_fields=extracted_fields,
+            warnings=warnings,
+            error_message=None,
+        )
+
+    async def extract_fields_from_ocr_text(
+        self,
+        document_type: str,
+        ocr_text: str,
+    ) -> dict:
+        if document_type == "passport_main":
+            gpt_json = await self._run_gpt(
+                "passport_main",
+                PASSPORT_MAIN_PROMPT,
+                ocr_text,
+            )
+            return _postprocess_passport_main(gpt_json, ocr_text)
+        if document_type == "passport_registration":
+            gpt_json = await self._run_gpt(
+                "passport_registration",
+                PASSPORT_REGISTRATION_PROMPT,
+                ocr_text,
+            )
+            return _postprocess_passport_registration(gpt_json, ocr_text)
+        if document_type == "snils":
+            gpt_json = await self._run_gpt("snils", SNILS_PROMPT, ocr_text)
+            return _postprocess_snils(gpt_json, ocr_text)
+        if document_type == "tin":
+            gpt_json = await self._run_gpt("tin", TIN_PROMPT, ocr_text)
+            return _postprocess_tin(gpt_json, ocr_text)
+        return {"document_type": document_type}
 
     async def recognize_passport_main(
         self,
@@ -254,8 +358,7 @@ class CustomerDocumentRecognitionService:
         if not _is_document_type_allowed(guard, "passport_main"):
             return _build_document_type_mismatch("passport_main", guard)
 
-        gpt_json = await self._run_gpt("passport_main", PASSPORT_MAIN_PROMPT, ocr_text)
-        return _postprocess_passport_main(gpt_json, ocr_text)
+        return await self.extract_fields_from_ocr_text("passport_main", ocr_text)
 
     async def recognize_passport_registration(
         self,
@@ -276,13 +379,8 @@ class CustomerDocumentRecognitionService:
         if not _is_registration_document_type_allowed(guard, ocr_text):
             return _build_document_type_mismatch("passport_registration", guard)
 
-        gpt_json = await self._run_gpt(
+        return await self.extract_fields_from_ocr_text(
             "passport_registration",
-            PASSPORT_REGISTRATION_PROMPT,
-            ocr_text,
-        )
-        return _postprocess_passport_registration(
-            gpt_json,
             ocr_text,
         )
 
@@ -298,8 +396,7 @@ class CustomerDocumentRecognitionService:
         if not _is_document_type_allowed(guard, "snils"):
             return _build_document_type_mismatch("snils", guard)
 
-        gpt_json = await self._run_gpt("snils", SNILS_PROMPT, ocr_text)
-        return _postprocess_snils(gpt_json, ocr_text)
+        return await self.extract_fields_from_ocr_text("snils", ocr_text)
 
     async def recognize_tin(
         self,
@@ -319,8 +416,7 @@ class CustomerDocumentRecognitionService:
         if not _is_tin_document_type_allowed(guard, ocr_text):
             return _build_document_type_mismatch("tin", guard)
 
-        gpt_json = await self._run_gpt("tin", TIN_PROMPT, ocr_text)
-        return _postprocess_tin(gpt_json, ocr_text)
+        return await self.extract_fields_from_ocr_text("tin", ocr_text)
 
     async def detect_document_type(
         self,

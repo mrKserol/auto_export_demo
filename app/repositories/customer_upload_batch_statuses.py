@@ -38,10 +38,27 @@ class CustomerUploadBatchStatus:
         }
     )
 
+    RECOGNITION_RESUMABLE = frozenset(
+        {
+            COLLECTING,
+            RECOGNIZING,
+            FAILED,
+        }
+    )
+
     ACTIVE = frozenset(ALL - TERMINAL)
 
 
 class CustomerUploadBatchFileRecognitionStatus:
     PENDING = "pending"
-    RECOGNIZED = "recognized"
+    PROCESSING = "processing"
+    SUCCESS = "success"
     FAILED = "failed"
+
+    NEEDS_RECOGNITION = frozenset(
+        {
+            PENDING,
+            PROCESSING,
+            FAILED,
+        }
+    )

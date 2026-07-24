@@ -136,35 +136,74 @@ class YandexOCRService:
         }
 
         timeout = aiohttp.ClientTimeout(total=120)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for attempt in range(self.max_retries):
-                async with session.post(OCR_ENDPOINT, json=payload, headers=headers) as response:
-                    if response.status == 429 and attempt < self.max_retries - 1:
-                        delay = self.min_delay_seconds * (attempt + 1)
+        last_error: Exception | None = None
+        async with _OCR_REQUEST_LOCK:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for attempt in range(self.max_retries):
+                    try:
+                        async with session.post(
+                            OCR_ENDPOINT,
+                            json=payload,
+                            headers=headers,
+                        ) as response:
+                            if (
+                                response.status in _RETRYABLE_HTTP_STATUSES
+                                and attempt < self.max_retries - 1
+                            ):
+                                delay = _retry_delay_seconds(attempt)
+                                logger.warning(
+                                    "Yandex OCR retryable status=%s attempt=%s/%s "
+                                    "delay=%.1fs",
+                                    response.status,
+                                    attempt + 1,
+                                    self.max_retries,
+                                    delay,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+
+                            if response.status >= 400:
+                                error_body = await response.text()
+                                logger.error(
+                                    "Yandex OCR failed with status %s: %s",
+                                    response.status,
+                                    _short_error(error_body),
+                                )
+                                raise RuntimeError(
+                                    f"Yandex OCR error {response.status}: "
+                                    f"{_short_error(error_body)}"
+                                )
+
+                            response_json = await response.json()
+                            return _extract_ocr_text(response_json)
+                    except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        last_error = exc
+                        if attempt >= self.max_retries - 1:
+                            break
+                        delay = _retry_delay_seconds(attempt)
                         logger.warning(
-                            "Yandex OCR rate limited, retry %s/%s in %.1fs",
+                            "Yandex OCR transport error attempt=%s/%s delay=%.1fs: %s",
                             attempt + 1,
                             self.max_retries,
                             delay,
+                            type(exc).__name__,
                         )
                         await asyncio.sleep(delay)
-                        continue
 
-                    if response.status >= 400:
-                        error_body = await response.text()
-                        logger.error(
-                            "Yandex OCR failed with status %s: %s",
-                            response.status,
-                            _short_error(error_body),
-                        )
-                        raise RuntimeError(
-                            f"Yandex OCR error {response.status}: {_short_error(error_body)}"
-                        )
-
-                    response_json = await response.json()
-                    return _extract_ocr_text(response_json)
-
+        if last_error is not None:
+            raise RuntimeError(
+                f"Yandex OCR retries exhausted: {type(last_error).__name__}"
+            ) from last_error
         raise RuntimeError("Yandex OCR retries exhausted")
+
+
+_OCR_REQUEST_LOCK = asyncio.Lock()
+_RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    # attempt 0 -> 1s, 1 -> 2s, 2 -> 4s
+    return float(2 ** attempt)
 
 
 REGISTRATION_OCR_KEYWORDS = {

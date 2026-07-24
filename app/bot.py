@@ -23,6 +23,9 @@ from app.handlers.start import router as start_router
 from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
 )
+from app.services.customer_batch_recognition_service import (
+    CustomerBatchRecognitionService,
+)
 from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
@@ -114,6 +117,10 @@ async def run_application(settings: Settings) -> None:
     await database.connect()
     await yandex_disk_client.ensure_base_path()
     customer_upload_batch_repository = CustomerUploadBatchRepository(database.pool)
+    customer_batch_recognition_service = CustomerBatchRecognitionService(
+        repository=customer_upload_batch_repository,
+        recognition_service=customer_document_recognition_service,
+    )
 
     polling_task = asyncio.create_task(
         dispatcher.start_polling(
@@ -125,6 +132,7 @@ async def run_application(settings: Settings) -> None:
             customer_document_recognition_service=customer_document_recognition_service,
             estimate_recognition_service=estimate_recognition_service,
             customer_upload_batch_repository=customer_upload_batch_repository,
+            customer_batch_recognition_service=customer_batch_recognition_service,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",
