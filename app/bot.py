@@ -105,6 +105,7 @@ async def run_application(settings: Settings) -> None:
         settings=settings,
         database=database,
         bot=bot,
+        yandex_disk_client=yandex_disk_client,
     )
     uvicorn_config = uvicorn.Config(
         fastapi_app,

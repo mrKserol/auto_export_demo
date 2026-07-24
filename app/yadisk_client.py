@@ -88,6 +88,8 @@ class YandexDiskClient:
     ) -> str:
         source_path = self._normalize_path(from_path)
         destination_path = self._normalize_path(to_path)
+        if source_path == destination_path:
+            return destination_path
         await self._ensure_parent_directory(destination_path)
 
         url = (
@@ -96,11 +98,25 @@ class YandexDiskClient:
             f"&path={quote(destination_path, safe='')}"
             f"&overwrite={str(overwrite).lower()}"
         )
-        async with aiohttp.ClientSession(headers=self._headers) as session:
-            async with session.post(url) as response:
-                response.raise_for_status()
 
-        return destination_path
+        async def attempt() -> str:
+            async with aiohttp.ClientSession(headers=self._headers) as session:
+                async with session.post(url) as response:
+                    if response.status in _RETRYABLE_HTTP_STATUSES:
+                        body = await response.text()
+                        raise _RetryableYandexDiskError(
+                            response.status,
+                            f"move_resource status={response.status}: {body[:200]}",
+                        )
+                    if response.status == 409 and not overwrite:
+                        body = await response.text()
+                        raise _ConflictYandexDiskError(
+                            f"move_resource conflict: {body[:200]}"
+                        )
+                    response.raise_for_status()
+            return destination_path
+
+        return await _run_with_retries("move_resource", attempt)
 
     def build_customer_folder_path(self, folder_name: str) -> str:
         return f"{self.base_path}/{CUSTOMERS_FOLDER}/{folder_name}"
@@ -241,6 +257,14 @@ class _RetryableYandexDiskError(RuntimeError):
     def __init__(self, status: int, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+class ConflictYandexDiskError(RuntimeError):
+    """Raised when overwrite=False and destination already exists."""
+
+
+# Backwards-compatible alias used by internal move helper.
+_ConflictYandexDiskError = ConflictYandexDiskError
 
 
 async def _run_with_retries(operation: str, attempt_factory):

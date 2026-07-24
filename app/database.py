@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS customer_upload_batches (
     media_group_id TEXT,
     status TEXT NOT NULL DEFAULT 'collecting',
     customer_path TEXT,
+    customer_id BIGINT REFERENCES customers(id),
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -277,6 +278,14 @@ ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_name_translit TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS surname_translit TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_path TEXT;",
+]
+
+ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL = [
+    """
+    ALTER TABLE customer_upload_batches
+    ADD COLUMN IF NOT EXISTS customer_id BIGINT
+    REFERENCES customers(id);
+    """,
 ]
 
 ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL = """
@@ -451,6 +460,8 @@ class Database:
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCHES_TABLE_SQL)
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL)
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
+                await connection.execute(statement)
+            for statement in ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL:
                 await connection.execute(statement)
             for statement in ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL:
                 await connection.execute(statement)

@@ -29,6 +29,7 @@ from app.web.schemas import SpecificationFormIn
 from app.web.schemas import SpecificationEditContextIn, SpecificationEditFormIn
 from app.web.schemas import EstimateFormIn
 from app.web.schemas import CustomerEditContextIn, CustomerEditFormIn
+from app.web.schemas import CustomerBatchFileDocumentTypeIn
 from app.web.token_service import TokenError, verify_specification_context_token, verify_estimate_context_token
 from app.web.token_service import verify_specification_edit_context_token, verify_customer_edit_context_token
 from app.web.token_service import verify_customer_batch_context_token
@@ -38,7 +39,13 @@ from app.services.customer_batch_data_service import (
     assemble_customer_data_from_batch_files,
     customer_fields_for_create,
 )
-from app.services.customer_batch_recognition_service import validate_document_kit
+from app.services.customer_batch_verification_service import (
+    CustomerBatchVerificationService,
+    build_save_warnings,
+    format_kit_for_form,
+    serialize_batch_file_for_form,
+)
+from app.yadisk_client import YandexDiskClient
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +82,10 @@ def get_database(request: Request) -> Database:
 
 def get_bot(request: Request) -> Bot:
     return request.app.state.bot
+
+
+def get_yandex_disk_client(request: Request) -> YandexDiskClient | None:
+    return getattr(request.app.state, "yandex_disk_client", None)
 
 
 @router.get("/health")
@@ -342,17 +353,18 @@ async def get_customer_edit_context(
         batch = await repository.get_batch_by_id(int(batch_context.batch_id))
         if batch is None:
             return error_response(404, "BATCH_NOT_FOUND", "Пакет документов не найден")
-        if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
-            return error_response(
-                409,
-                "BATCH_ALREADY_SAVED",
-                "Клиент по этому пакету уже сохранён",
-            )
-        files = await repository.get_batch_files(int(batch_context.batch_id))
-        kit = validate_document_kit(files)
+
+        files = await repository.get_batch_files_with_paths(int(batch_context.batch_id))
+        kit_raw = await repository.recalculate_batch_validation(int(batch_context.batch_id))
+        kit = format_kit_for_form(kit_raw, files)
         assembled = assemble_customer_data_from_batch_files(
             files,
-            kit_warnings=kit.warnings,
+            kit_warnings=kit_raw.get("warnings"),
+        )
+        warnings = build_save_warnings(
+            fields=assembled.fields,
+            kit_warnings=assembled.warnings,
+            files=files,
         )
         values = {
             "passport": assembled.fields.get("passport"),
@@ -371,17 +383,21 @@ async def get_customer_edit_context(
             "phone": assembled.fields.get("phone"),
             "email": assembled.fields.get("email"),
         }
-        return JSONResponse(
-            status_code=200,
-            content={
-                "ok": True,
-                "mode": "create_from_batch",
-                "batch_id": batch_context.batch_id,
-                "customer_path": batch.get("customer_path"),
-                "warnings": assembled.warnings,
-                "values": values,
-            },
-        )
+        already_saved = batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED
+        content = {
+            "ok": True,
+            "mode": "create_from_batch",
+            "batch_id": batch_context.batch_id,
+            "customer_path": batch.get("customer_path"),
+            "customer_id": batch.get("customer_id"),
+            "already_saved": already_saved,
+            "warnings": warnings,
+            "kit": kit,
+            "documents": [serialize_batch_file_for_form(row) for row in files],
+            "values": values,
+            "message": "Клиент уже сохранён" if already_saved else None,
+        }
+        return JSONResponse(status_code=200, content=content)
 
     try:
         context = verify_customer_edit_context_token(
@@ -425,6 +441,124 @@ async def get_customer_edit_context(
     )
 
 
+@router.patch("/api/customer-batches/{batch_id}/files/{file_id}/document-type")
+async def patch_customer_batch_file_document_type(
+    batch_id: int,
+    file_id: int,
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+    yandex_disk_client: YandexDiskClient | None = Depends(get_yandex_disk_client),
+) -> JSONResponse:
+    try:
+        form = CustomerBatchFileDocumentTypeIn.model_validate(payload)
+    except ValidationError as error:
+        field_errors = {}
+        for item in error.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            field_errors[loc or "_form"] = item.get("msg", "Некорректное значение")
+        return error_response(
+            422,
+            "VALIDATION_ERROR",
+            "Проверьте тип документа",
+            extra={"fields": field_errors},
+        )
+
+    try:
+        telegram_user = validate_telegram_init_data(
+            form.telegram_init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+    except InitDataError as error:
+        return error_response(401, error.code, error.message)
+
+    try:
+        batch_context = verify_customer_batch_context_token(
+            form.context_token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=telegram_user.id,
+        )
+    except TokenError as error:
+        return error_response(401, error.code, error.message)
+
+    if int(batch_context.batch_id) != int(batch_id):
+        return error_response(
+            403,
+            "BATCH_FORBIDDEN",
+            "Токен не относится к этому пакету документов",
+        )
+
+    if yandex_disk_client is None:
+        return error_response(
+            503,
+            "DISK_UNAVAILABLE",
+            "Сервис Яндекс Диска недоступен",
+        )
+
+    repository = CustomerUploadBatchRepository(database.pool)
+    service = CustomerBatchVerificationService(
+        repository=repository,
+        yandex_disk_client=yandex_disk_client,
+    )
+    try:
+        result = await service.update_file_document_type(
+            batch_id=batch_id,
+            file_id=file_id,
+            document_type=form.document_type,
+        )
+    except PermissionError as error:
+        message = str(error)
+        if message == "batch_already_saved":
+            return error_response(
+                409,
+                "BATCH_ALREADY_SAVED",
+                "Клиент уже сохранён. Изменение типа документа недоступно.",
+            )
+        return error_response(
+            409,
+            "BATCH_NOT_EDITABLE",
+            "Пакет документов сейчас нельзя редактировать",
+        )
+    except LookupError:
+        return error_response(
+            404,
+            "FILE_NOT_FOUND",
+            "Файл пакета не найден",
+        )
+    except ValueError:
+        return error_response(
+            422,
+            "VALIDATION_ERROR",
+            "Недопустимый тип документа",
+        )
+    except Exception:
+        logger.exception(
+            "Failed to update batch file document type batch_id=%s file_id=%s",
+            batch_id,
+            file_id,
+        )
+        return error_response(
+            500,
+            "DOCUMENT_TYPE_UPDATE_ERROR",
+            "Не удалось обновить тип документа",
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "batch_id": batch_id,
+            "file": result.file,
+            "kit": result.kit,
+            "warnings": result.warnings,
+            "values": result.values,
+            "renamed": result.renamed,
+            "move_error": result.move_error,
+        },
+    )
+
+
 @router.put("/api/customers")
 async def update_customer_api(
     payload: dict[str, Any],
@@ -464,7 +598,24 @@ async def update_customer_api(
         batch = await repository.get_batch_by_id(int(batch_context.batch_id))
         if batch is None:
             return error_response(404, "BATCH_NOT_FOUND", "Пакет документов не найден")
+
         if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+            existing_id = batch.get("customer_id")
+            if existing_id:
+                existing_customer = await database.get_customer_by_id(int(existing_id))
+                if existing_customer:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "ok": True,
+                            "mode": "create_from_batch",
+                            "already_saved": True,
+                            "customer_id": int(existing_id),
+                            "batch_id": batch_context.batch_id,
+                            "customer_path": batch.get("customer_path"),
+                            "message": "Клиент уже сохранён",
+                        },
+                    )
             return error_response(
                 409,
                 "BATCH_ALREADY_SAVED",
@@ -487,7 +638,7 @@ async def update_customer_api(
                 "Клиент с таким паспортом уже существует",
             )
 
-        files = await repository.get_batch_files(int(batch_context.batch_id))
+        files = await repository.get_batch_files_with_paths(int(batch_context.batch_id))
         assembled = assemble_customer_data_from_batch_files(files)
         overrides = form.model_dump(
             exclude={"context_token", "telegram_init_data"},
@@ -499,14 +650,61 @@ async def update_customer_api(
                 if hasattr(date_issue, "isoformat")
                 else str(date_issue)
             )
+        # Empty optional strings should clear / stay empty without blocking save.
+        for optional_key in (
+            "surname",
+            "registration_address",
+            "ipain",
+            "tin",
+            "phone",
+            "email",
+            "by_whom_issued",
+            "department_code",
+        ):
+            if overrides.get(optional_key) is None:
+                continue
+            if str(overrides[optional_key]).strip() == "":
+                overrides[optional_key] = None
+
         customer_data = customer_fields_for_create(
             assembled,
             customer_path=batch.get("customer_path"),
             overrides=overrides,
         )
+        save_warnings = build_save_warnings(
+            fields={**assembled.fields, **{k: overrides.get(k) for k in overrides}},
+            kit_warnings=assembled.warnings,
+            files=files,
+        )
         try:
             customer = await database.create_customer(customer_data)
-            await repository.mark_batch_customer_saved(int(batch_context.batch_id))
+            marked = await repository.try_mark_batch_customer_saved(
+                int(batch_context.batch_id),
+                customer_id=int(customer["id"]),
+            )
+            if marked is None:
+                # Another request finished the batch first.
+                refreshed = await repository.get_batch_by_id(int(batch_context.batch_id))
+                existing_id = refreshed.get("customer_id") if refreshed else None
+                if existing_id:
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "ok": True,
+                            "mode": "create_from_batch",
+                            "already_saved": True,
+                            "customer_id": int(existing_id),
+                            "batch_id": batch_context.batch_id,
+                            "customer_path": (
+                                refreshed.get("customer_path") if refreshed else None
+                            ),
+                            "message": "Клиент уже сохранён",
+                        },
+                    )
+                await repository.mark_batch_customer_saved(
+                    int(batch_context.batch_id),
+                    customer_id=int(customer["id"]),
+                )
         except Exception:
             logger.exception(
                 "Failed to create customer from batch_id=%s",
@@ -518,13 +716,23 @@ async def update_customer_api(
                 "Не удалось сохранить клиента",
             )
 
+        customer_path = batch.get("customer_path")
         try:
             notify_chat_id = int(batch_context.origin_chat_id or telegram_user.id)
             has_est = await customer_has_estimate(customer, database)
+            path_block = (
+                f"\n\nПапка документов:\n{customer_path}"
+                if customer_path
+                else ""
+            )
             await bot.send_message(
                 chat_id=notify_chat_id,
-                text="✅ Клиент добавлен\n\n"
-                + await build_customer_card(customer, database),
+                text=(
+                    "Клиент сохранён."
+                    f"{path_block}\n\n"
+                    "✅ Клиент добавлен\n\n"
+                    + await build_customer_card(customer, database)
+                ),
                 reply_markup=build_customer_card_keyboard(
                     customer,
                     is_admin=False,
@@ -544,6 +752,8 @@ async def update_customer_api(
                 "mode": "create_from_batch",
                 "customer_id": customer["id"],
                 "batch_id": batch_context.batch_id,
+                "customer_path": customer_path,
+                "warnings": save_warnings,
                 "message": "Клиент сохранён",
             },
         )

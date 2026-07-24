@@ -675,7 +675,12 @@ class CustomerUploadBatchRepository:
                 file_id,
             )
 
-    async def mark_batch_customer_saved(self, batch_id: int) -> dict:
+    async def mark_batch_customer_saved(
+        self,
+        batch_id: int,
+        *,
+        customer_id: int | None = None,
+    ) -> dict:
         now = datetime.now(timezone.utc)
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
@@ -683,6 +688,7 @@ class CustomerUploadBatchRepository:
                 UPDATE customer_upload_batches
                 SET
                     status = $2,
+                    customer_id = COALESCE($4, customer_id),
                     updated_at = $3,
                     completed_at = COALESCE(completed_at, $3)
                 WHERE id = $1
@@ -691,11 +697,152 @@ class CustomerUploadBatchRepository:
                 batch_id,
                 CustomerUploadBatchStatus.CUSTOMER_SAVED,
                 now,
+                customer_id,
             )
             result = _record_to_dict(row)
             if result is None:
                 raise LookupError(f"customer_upload_batch id={batch_id} not found")
             return result
+
+    async def try_mark_batch_customer_saved(
+        self,
+        batch_id: int,
+        *,
+        customer_id: int,
+    ) -> dict | None:
+        """Atomically finish batch only when it is not already customer_saved."""
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    customer_id = $4,
+                    updated_at = $3,
+                    completed_at = COALESCE(completed_at, $3),
+                    error_message = NULL
+                WHERE id = $1
+                  AND status <> $2
+                RETURNING *;
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.CUSTOMER_SAVED,
+                now,
+                customer_id,
+            )
+            return _record_to_dict(row)
+
+    async def get_batch_file(self, file_id: int) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM customer_upload_batch_files
+                WHERE id = $1;
+                """,
+                file_id,
+            )
+            return _normalize_file_record(row)
+
+    async def get_batch_files_with_paths(self, batch_id: int) -> list[dict]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    id,
+                    batch_id,
+                    telegram_message_id,
+                    telegram_file_id,
+                    original_filename,
+                    mime_type,
+                    file_extension,
+                    file_size,
+                    detected_document_type,
+                    recognition_status,
+                    extracted_json,
+                    error_message,
+                    final_yadisk_path,
+                    created_at,
+                    updated_at
+                FROM customer_upload_batch_files
+                WHERE batch_id = $1
+                ORDER BY id ASC;
+                """,
+                batch_id,
+            )
+            return [
+                normalized
+                for row in rows
+                if (normalized := _normalize_file_record(row)) is not None
+            ]
+
+    async def update_file_document_type(
+        self,
+        file_id: int,
+        *,
+        detected_document_type: str,
+        extracted_json: dict | list | None = None,
+        error_message: str | None = None,
+        clear_error_message: bool = False,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        payload = (
+            json.dumps(extracted_json, ensure_ascii=False)
+            if extracted_json is not None
+            else None
+        )
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batch_files
+                SET
+                    detected_document_type = $2,
+                    recognition_status = $3,
+                    extracted_json = COALESCE($4::jsonb, extracted_json),
+                    error_message = CASE
+                        WHEN $6 THEN NULL
+                        ELSE COALESCE($5, error_message)
+                    END,
+                    updated_at = $7
+                WHERE id = $1
+                RETURNING *;
+                """,
+                file_id,
+                detected_document_type,
+                CustomerUploadBatchFileRecognitionStatus.SUCCESS,
+                payload,
+                error_message,
+                clear_error_message,
+                now,
+            )
+            result = _normalize_file_record(row)
+            if result is None:
+                raise LookupError(
+                    f"customer_upload_batch_file id={file_id} not found"
+                )
+            return result
+
+    async def recalculate_batch_validation(self, batch_id: int) -> dict:
+        from app.services.customer_batch_recognition_service import (
+            validate_document_kit,
+        )
+
+        files = await self.get_batch_files_with_paths(batch_id)
+        kit = validate_document_kit(files)
+        return {
+            "is_complete": kit.is_complete,
+            "missing_types": list(kit.missing_types),
+            "duplicate_types": list(kit.duplicate_types),
+            "unknown_file_ids": list(kit.unknown_file_ids),
+            "mixed_file_ids": list(kit.mixed_file_ids),
+            "failed_file_ids": list(kit.failed_file_ids),
+            "warnings": list(kit.warnings),
+            "documents_by_type": {
+                key: [int(row["id"]) for row in rows]
+                for key, rows in kit.documents_by_type.items()
+            },
+        }
 
     async def mark_batch_awaiting_confirmation(self, batch_id: int) -> dict:
         return await self.update_batch_status(

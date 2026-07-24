@@ -17,11 +17,13 @@ def create_fastapi_app(
     settings: Settings,
     database: Database,
     bot,
+    yandex_disk_client=None,
 ) -> FastAPI:
     app = FastAPI(title="Auto Export Mini App", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.database = database
     app.state.bot = bot
+    app.state.yandex_disk_client = yandex_disk_client
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(router)

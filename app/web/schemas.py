@@ -198,6 +198,15 @@ class CustomerFields(BaseModel):
     phone: str | None = None
     email: EmailStr | None = None
 
+    @field_validator("email", mode="before")
+    @classmethod
+    def empty_email_to_none(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
 
 class CustomerEditContextIn(BaseModel):
     context_token: str
@@ -217,6 +226,34 @@ class CustomerEditFormIn(CustomerFields):
     @classmethod
     def strip_strings2(cls, v):
         return (v or "").strip()
+
+
+ALLOWED_CUSTOMER_BATCH_DOCUMENT_TYPES = (
+    "passport_main",
+    "passport_registration",
+    "snils",
+    "tin",
+    "unknown",
+    "mixed",
+)
+
+
+class CustomerBatchFileDocumentTypeIn(BaseModel):
+    document_type: str
+    context_token: str
+    telegram_init_data: str
+
+    @field_validator("document_type", "context_token", "telegram_init_data", mode="before")
+    @classmethod
+    def strip_strings(cls, v):
+        return (v or "").strip()
+
+    @field_validator("document_type")
+    @classmethod
+    def validate_document_type(cls, value: str) -> str:
+        if value not in ALLOWED_CUSTOMER_BATCH_DOCUMENT_TYPES:
+            raise ValueError("Недопустимый тип документа")
+        return value
 
 
 class EstimateFormIn(BaseModel):
