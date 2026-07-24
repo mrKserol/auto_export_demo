@@ -134,11 +134,12 @@ async def handle_customer_edit_menu(
     if callback.message is None or callback.from_user is None:
         return
 
-    if not await is_admin_for_customer_management(
-        bot, callback.message.chat.id, callback.from_user.id
-    ):
-        await callback.answer("Недостаточно прав", show_alert=True)
-        return
+    # Temporarily allow opening customer edit Mini App for all users.
+    logger.info(
+        "Customer edit callback received customer_id=%s telegram_user_id=%s",
+        callback.data.split(":", 1)[1] if callback.data else None,
+        callback.from_user.id,
+    )
 
     customer_id = int(callback.data.split(":", 1)[1])
     from app.config import load_settings
@@ -154,6 +155,11 @@ async def handle_customer_edit_menu(
     url = build_customer_edit_miniapp_url(settings, token)
 
     if callback.message.chat.type == "private":
+        logger.info(
+            "Customer edit miniapp allowed customer_id=%s telegram_user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
         await callback.message.answer("Откройте форму с данными клиента:", reply_markup=build_customer_edit_open_keyboard(url))
         await callback.answer()
         return

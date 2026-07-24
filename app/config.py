@@ -20,6 +20,7 @@ class Settings:
     web_port: int
     mini_app_token_ttl_seconds: int
     telegram_init_data_max_age_seconds: int
+    app_commit_sha: str | None = None
 
 
 def _require_env(name: str) -> str:
@@ -103,4 +104,5 @@ def load_settings() -> Settings:
             "TELEGRAM_INIT_DATA_MAX_AGE_SECONDS",
             900,
         ),
+        app_commit_sha=os.getenv("APP_COMMIT_SHA", "e32df4b653191f547cd3d7055652912ed8a5924f"),
     )

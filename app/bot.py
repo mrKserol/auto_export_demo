@@ -59,6 +59,8 @@ async def run_application(settings: Settings) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Log application commit SHA for diagnostics
+    logging.getLogger(__name__).info("Application commit SHA: %s", settings.app_commit_sha or "unknown")
 
     bot = create_bot(settings)
     dispatcher = create_dispatcher()
