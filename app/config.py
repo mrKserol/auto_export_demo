@@ -20,6 +20,7 @@ class Settings:
     web_port: int
     mini_app_token_ttl_seconds: int
     telegram_init_data_max_age_seconds: int
+    customer_upload_max_file_bytes: int = 20 * 1024 * 1024
     app_commit_sha: str | None = None
 
 
@@ -103,6 +104,10 @@ def load_settings() -> Settings:
         telegram_init_data_max_age_seconds=_parse_int_env(
             "TELEGRAM_INIT_DATA_MAX_AGE_SECONDS",
             900,
+        ),
+        customer_upload_max_file_bytes=_parse_int_env(
+            "CUSTOMER_UPLOAD_MAX_FILE_BYTES",
+            20 * 1024 * 1024,
         ),
         app_commit_sha=os.getenv("APP_COMMIT_SHA", "e32df4b653191f547cd3d7055652912ed8a5924f"),
     )

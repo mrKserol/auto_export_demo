@@ -12,6 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from app.config import Settings
 from app.database import Database
 from app.handlers.customer_add import router as customer_add_router
+from app.handlers.customer_batch_upload import router as customer_batch_upload_router
 from app.handlers.customer_delete import router as customer_delete_router
 from app.handlers.customers import router as customers_router
 from app.handlers.documents import router as documents_router
@@ -19,6 +20,9 @@ from app.handlers.estimates import router as estimates_router
 from app.handlers.recognize import router as recognize_router
 from app.handlers.specifications import router as specifications_router
 from app.handlers.start import router as start_router
+from app.repositories.customer_upload_batch_repository import (
+    CustomerUploadBatchRepository,
+)
 from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
@@ -40,6 +44,7 @@ def create_bot(settings: Settings) -> Bot:
 def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    dispatcher.include_router(customer_batch_upload_router)
     dispatcher.include_router(customer_add_router)
     dispatcher.include_router(customers_router)
     dispatcher.include_router(customer_delete_router)
@@ -108,6 +113,7 @@ async def run_application(settings: Settings) -> None:
 
     await database.connect()
     await yandex_disk_client.ensure_base_path()
+    customer_upload_batch_repository = CustomerUploadBatchRepository(database.pool)
 
     polling_task = asyncio.create_task(
         dispatcher.start_polling(
@@ -117,7 +123,8 @@ async def run_application(settings: Settings) -> None:
             yandex_disk_client=yandex_disk_client,
             yandex_function_client=yandex_function_client,
             customer_document_recognition_service=customer_document_recognition_service,
-                estimate_recognition_service=estimate_recognition_service,
+            estimate_recognition_service=estimate_recognition_service,
+            customer_upload_batch_repository=customer_upload_batch_repository,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",

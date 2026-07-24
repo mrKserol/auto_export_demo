@@ -20,6 +20,11 @@ class CustomerAddStates(StatesGroup):
     waiting_manual_tin = State()
 
 
+class CustomerBatchUploadStates(StatesGroup):
+    collecting_documents = State()
+    processing_documents = State()
+
+
 class RecognizeDocumentStates(StatesGroup):
     waiting_document = State()
 

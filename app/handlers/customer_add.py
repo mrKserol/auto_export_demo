@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from io import BytesIO
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
@@ -10,6 +9,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.database import Database
 from app.handlers.customers import is_admin_for_customer_management
+from app.services.customer_file_download_service import (
+    CustomerFileDownloadError,
+    download_customer_file_from_telegram,
+)
 from app.services.customer_card_service import (
     build_customer_card,
     build_customer_card_keyboard,
@@ -22,8 +25,6 @@ from app.services.customer_document_recognition_service import (
 from app.services.customer_extraction_service import format_fio_normalized, person_names_match
 from app.services.file_service import (
     build_stored_filename,
-    get_file_extension,
-    get_original_filename,
 )
 from app.services.name_transliteration_service import apply_name_transliteration
 from app.services.validation_service import (
@@ -44,11 +45,11 @@ router = Router(name="customer_add")
 logger = logging.getLogger(__name__)
 
 PROCESSING_FILE_MESSAGE = "Подождите, обрабатываю файл…"
-CUSTOMER_UPLOAD_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "webp", "heic", "heif"}
 
 
-@router.message(Command("add_customer"))
-async def handle_add_customer(message: Message, state: FSMContext) -> None:
+@router.message(Command("add_customer_legacy"))
+async def handle_add_customer_legacy(message: Message, state: FSMContext) -> None:
+    """Temporary entry point for the old stepwise upload flow."""
     await state.clear()
     await state.set_state(CustomerAddStates.waiting_passport_main)
     await state.update_data(customer_fields={}, uploaded_files=[])
@@ -800,50 +801,37 @@ async def _upload_customer_file(
     message: Message,
     bot: Bot,
     yandex_disk_client: YandexDiskClient,
+    *,
+    max_file_bytes: int = 20 * 1024 * 1024,
 ) -> dict | None:
-    if message.document is not None:
-        file_id = message.document.file_id
-        original_filename = get_original_filename(message.document)
-        mime_type = message.document.mime_type
-    elif message.photo:
-        photo = message.photo[-1]
-        file_id = photo.file_id
-        original_filename = f"{message.message_id}_photo.jpg"
-        mime_type = "image/jpeg"
-    else:
-        return None
-
-    if not _is_customer_upload_supported(original_filename):
-        await message.reply(
-            "Формат файла не поддерживается. Поддерживаются: "
-            "pdf, jpg, jpeg, png, webp, heic, heif."
-        )
-        return None
-
     user = message.from_user
     if user is None:
         await message.reply("Не удалось определить пользователя Telegram.")
         return None
 
     try:
-        telegram_file = await bot.get_file(file_id)
-        if telegram_file.file_path is None:
-            raise RuntimeError("Telegram did not return a file path")
-        buffer = BytesIO()
-        await bot.download_file(telegram_file.file_path, destination=buffer)
-        file_content = buffer.getvalue()
-    except Exception:
-        logger.exception("Failed to download customer file")
-        await message.reply("Не удалось скачать файл из Telegram.")
+        downloaded = await download_customer_file_from_telegram(
+            message,
+            bot,
+            max_file_bytes=max_file_bytes,
+        )
+    except CustomerFileDownloadError as exc:
+        await message.reply(exc.user_message)
         return None
 
-    stored_filename = build_stored_filename(message.message_id, original_filename)
+    stored_filename = build_stored_filename(
+        message.message_id,
+        downloaded.original_filename,
+    )
     disk_path = yandex_disk_client.build_customer_intake_file_path(
         telegram_user_id=user.id,
         file_name=stored_filename,
     )
     try:
-        uploaded_path = await yandex_disk_client.upload_bytes(disk_path, file_content)
+        uploaded_path = await yandex_disk_client.upload_bytes(
+            disk_path,
+            downloaded.content,
+        )
     except Exception:
         logger.exception("Failed to upload customer file to Yandex Disk")
         await message.reply("Не удалось сохранить файл в Yandex Disk.")
@@ -851,9 +839,9 @@ async def _upload_customer_file(
 
     return {
         "path": uploaded_path,
-        "original_filename": original_filename,
-        "mime_type": mime_type,
-        "content": file_content,
+        "original_filename": downloaded.original_filename,
+        "mime_type": downloaded.mime_type,
+        "content": downloaded.content,
     }
 
 
@@ -865,10 +853,6 @@ async def _reject_media_group_if_needed(message: Message, expected_document_text
         )
         return True
     return False
-
-
-def _is_customer_upload_supported(filename: str) -> bool:
-    return get_file_extension(filename) in CUSTOMER_UPLOAD_EXTENSIONS
 
 
 def _format_document_type_mismatch_message(
