@@ -17,12 +17,11 @@ def build_customer_card_keyboard(
 
     if customer.get("specification_id"):
         if has_estimate:
+            # arrange in two rows:
+            # [Договор] [Смета]
+            # [Пересоздать смету] [Удалить смету]
             rows.append(
                 [
-                    InlineKeyboardButton(
-                        text="Пересоздать смету",
-                        callback_data=f"estimate:recreate:{customer_id}",
-                    ),
                     InlineKeyboardButton(
                         text="Договор",
                         callback_data=f"contract:generate:{customer_id}",
@@ -30,6 +29,14 @@ def build_customer_card_keyboard(
                     InlineKeyboardButton(
                         text="Смета",
                         callback_data=f"estimate:file:{customer_id}",
+                    ),
+                ]
+            )
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Пересоздать смету",
+                        callback_data=f"estimate:recreate:{customer_id}",
                     ),
                     InlineKeyboardButton(
                         text="Удалить смету",
