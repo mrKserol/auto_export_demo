@@ -59,6 +59,12 @@ USER_STATUS_MESSAGES = {
     CustomerUploadBatchStatus.FAILED: "Ошибка обработки",
 }
 
+PROCESSING_INTERRUPTED = "processing_interrupted"
+PROCESSING_INTERRUPTED_USER_MESSAGE = (
+    "Обработка была прервана перезапуском сервиса. "
+    "Запустите распознавание повторно."
+)
+
 
 class MiniAppBatchError(Exception):
     def __init__(self, code: str, message: str, *, status_code: int = 400) -> None:
@@ -204,19 +210,30 @@ def serialize_batch_status(
         ),
     }
 
+    technical_error = str(batch.get("error_message") or "")
+    interrupted = technical_error == PROCESSING_INTERRUPTED
+    if interrupted:
+        error_code = "PROCESSING_INTERRUPTED"
+        error_message = PROCESSING_INTERRUPTED_USER_MESSAGE
+        user_message = PROCESSING_INTERRUPTED_USER_MESSAGE
+    elif status == CustomerUploadBatchStatus.FAILED:
+        error_code = "BATCH_FAILED"
+        error_message = "Распознавание временно недоступно"
+        user_message = USER_STATUS_MESSAGES.get(status, "Обработка")
+    else:
+        error_code = None
+        error_message = None
+        user_message = USER_STATUS_MESSAGES.get(status, "Обработка")
+
     return {
         "batch_id": int(batch["id"]),
         "status": status,
         "origin": batch.get("origin"),
         "customer_id": batch.get("customer_id"),
         "customer_path": batch.get("customer_path"),
-        "user_message": USER_STATUS_MESSAGES.get(status, "Обработка"),
-        "error_code": "BATCH_FAILED" if status == CustomerUploadBatchStatus.FAILED else None,
-        "error_message": (
-            "Распознавание временно недоступно"
-            if status == CustomerUploadBatchStatus.FAILED
-            else None
-        ),
+        "user_message": user_message,
+        "error_code": error_code,
+        "error_message": error_message,
         "progress": progress,
         "files": file_payload,
         "kit": format_kit_for_form(kit_dict, files) if kit_dict else None,
@@ -470,3 +487,36 @@ async def run_batch_processing(
                 "Failed to mark miniapp batch failed batch_id=%s",
                 batch_id,
             )
+
+
+async def maybe_recover_stale_batch(
+    repository: CustomerUploadBatchRepository,
+    *,
+    batch_id: int,
+    stale_after_seconds: int,
+) -> dict | None:
+    """Recover a single stale recognizing batch if the timeout elapsed."""
+    return await repository.recover_stale_recognizing_batch(
+        batch_id,
+        stale_after_seconds=stale_after_seconds,
+        origin=BATCH_ORIGIN_MINIAPP,
+    )
+
+
+async def recover_stale_miniapp_batches_on_startup(
+    repository: CustomerUploadBatchRepository,
+    *,
+    stale_after_seconds: int,
+) -> list[dict]:
+    """Mark interrupted Mini App OCR batches recoverable without starting OCR."""
+    recovered = await repository.recover_stale_recognizing_batches(
+        stale_after_seconds=stale_after_seconds,
+        origin=BATCH_ORIGIN_MINIAPP,
+    )
+    if recovered:
+        logger.warning(
+            "Recovered %s stale Mini App recognizing batch(es) after restart",
+            len(recovered),
+        )
+    return recovered
+

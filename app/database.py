@@ -318,6 +318,10 @@ ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL = [
     ALTER TABLE customer_upload_batch_files
     ADD COLUMN IF NOT EXISTS declared_document_type TEXT;
     """,
+    """
+    ALTER TABLE customer_upload_batches
+    ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ;
+    """,
 ]
 
 ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL = """

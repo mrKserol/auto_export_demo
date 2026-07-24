@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -14,12 +13,16 @@ from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
 )
 from app.repositories.customer_upload_batch_statuses import CustomerUploadBatchStatus
+from app.services.miniapp_background_tasks import (
+    spawn_miniapp_background_task,
+)
 from app.services.miniapp_batch_api_service import (
     BATCH_ORIGIN_MINIAPP,
     MiniAppBatchError,
     assert_batch_owner,
     create_miniapp_batch,
     delete_batch_slot_file,
+    maybe_recover_stale_batch,
     run_batch_processing,
     serialize_batch_status,
     upload_batch_file,
@@ -514,6 +517,15 @@ async def get_customer_batch_status_api(
         )
     except MiniAppBatchError as error:
         return error_response(error.status_code, error.code, error.message)
+
+    recovered = await maybe_recover_stale_batch(
+        repository,
+        batch_id=batch_id,
+        stale_after_seconds=settings.customer_batch_stale_processing_seconds,
+    )
+    if recovered is not None:
+        batch = recovered
+
     files = await repository.get_batch_files(batch_id)
     return JSONResponse({"ok": True, "batch": serialize_batch_status(batch, files)})
 
@@ -551,6 +563,14 @@ async def recognize_customer_batch_api(
         )
     except MiniAppBatchError as error:
         return error_response(error.status_code, error.code, error.message)
+
+    recovered = await maybe_recover_stale_batch(
+        repository,
+        batch_id=batch_id,
+        stale_after_seconds=settings.customer_batch_stale_processing_seconds,
+    )
+    if recovered is not None:
+        batch = recovered
 
     if batch.get("status") in {
         CustomerUploadBatchStatus.RECOGNIZING,
@@ -605,12 +625,13 @@ async def recognize_customer_batch_api(
             }
         )
 
-    asyncio.create_task(
+    spawn_miniapp_background_task(
         run_batch_processing(
             batch_id=batch_id,
             recognition_service=recognition_service,
             folder_service=folder_service,
-        )
+        ),
+        name=f"miniapp-batch-{batch_id}",
     )
     files = await repository.get_batch_files(batch_id)
     refreshed = await repository.get_batch_by_id(batch_id)

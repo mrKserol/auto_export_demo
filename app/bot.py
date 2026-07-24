@@ -30,9 +30,13 @@ from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
 from app.services.customer_folder_service import CustomerFolderService
+from app.services.estimate_recognition_service import EstimateRecognitionService
+from app.services.miniapp_background_tasks import pending_miniapp_task_count
+from app.services.miniapp_batch_api_service import (
+    recover_stale_miniapp_batches_on_startup,
+)
 from app.services.yandex_gpt_service import YandexGPTService
 from app.services.yandex_ocr_service import YandexOCRService
-from app.services.estimate_recognition_service import EstimateRecognitionService
 from app.web.app import create_fastapi_app
 from app.yadisk_client import YandexDiskClient
 from app.yandex_function_client import YandexFunctionClient
@@ -131,6 +135,16 @@ async def run_application(settings: Settings) -> None:
         yandex_disk_client=yandex_disk_client,
     )
 
+    recovered = await recover_stale_miniapp_batches_on_startup(
+        customer_upload_batch_repository,
+        stale_after_seconds=settings.customer_batch_stale_processing_seconds,
+    )
+    if recovered:
+        logger.info(
+            "Startup recovered %s Mini App batch(es) stuck in recognizing",
+            len(recovered),
+        )
+
     fastapi_app = create_fastapi_app(
         settings=settings,
         database=database,
@@ -186,6 +200,13 @@ async def run_application(settings: Settings) -> None:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
     finally:
+        unfinished = pending_miniapp_task_count()
+        if unfinished:
+            logger.warning(
+                "Shutting down with %s unfinished Mini App background task(s); "
+                "stale recognizing batches will be recovered on next startup",
+                unfinished,
+            )
         web_server.should_exit = True
         await dispatcher.stop_polling()
         await database.close()

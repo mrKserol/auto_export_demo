@@ -21,6 +21,7 @@ class Settings:
     mini_app_token_ttl_seconds: int
     telegram_init_data_max_age_seconds: int
     customer_upload_max_file_bytes: int = 20 * 1024 * 1024
+    customer_batch_stale_processing_seconds: int = 600
     telegram_bot_username: str | None = None
     miniapp_test_mode: bool = False
     miniapp_allowed_telegram_user_ids: frozenset[int] = field(default_factory=frozenset)
@@ -145,6 +146,10 @@ def load_settings() -> Settings:
         customer_upload_max_file_bytes=_parse_int_env(
             "CUSTOMER_UPLOAD_MAX_FILE_BYTES",
             20 * 1024 * 1024,
+        ),
+        customer_batch_stale_processing_seconds=_parse_int_env(
+            "CUSTOMER_BATCH_STALE_PROCESSING_SECONDS",
+            600,
         ),
         telegram_bot_username=(
             (os.getenv("TELEGRAM_BOT_USERNAME") or "").strip().lstrip("@") or None

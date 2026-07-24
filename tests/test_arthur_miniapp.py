@@ -754,6 +754,258 @@ class MiniAppUnitHelpersTests(unittest.TestCase):
         self.assertEqual(mime, "image/jpeg")
 
 
+@unittest.skipUnless(
+    resolve_test_database_url() is not None,
+    "Need TEST_DATABASE_URL or local postgres + testing.postgresql",
+)
+class MiniAppRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    _pg = None
+    database_url: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        resolved = resolve_test_database_url()
+        if resolved is None:
+            raise unittest.SkipTest("PostgreSQL test backend unavailable")
+        if resolved == "__testing_postgresql__":
+            import testing.postgresql
+
+            ensure_postgres_on_path()
+            cls._pg = testing.postgresql.Postgresql()
+            cls.database_url = cls._pg.url()
+        else:
+            cls.database_url = resolved
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if cls._pg is not None:
+            cls._pg.stop()
+            cls._pg = None
+
+    async def asyncSetUp(self) -> None:
+        self.db = Database(self.database_url)
+        await self.db.connect()
+        self.repo = CustomerUploadBatchRepository(self.db.pool)
+        self.user_id = 420000 + (uuid.uuid4().int % 100000)
+        self.settings = _settings(
+            database_url=self.database_url,
+            miniapp_allowed_telegram_user_ids=frozenset({self.user_id, OTHER_USER}),
+            customer_batch_stale_processing_seconds=60,
+        )
+        self.recognition = AsyncMock()
+        self.recognition.process_batch = AsyncMock()
+        self.recognition.repository = self.repo
+        self.folder = AsyncMock()
+        self.folder.ensure_batch_files_saved = AsyncMock()
+        self.folder.repository = self.repo
+        self.app = create_fastapi_app(
+            settings=self.settings,
+            database=self.db,
+            bot=MagicMock(),
+            customer_batch_recognition_service=self.recognition,
+            customer_folder_service=self.folder,
+        )
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app),
+            base_url="http://test",
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.client.aclose()
+        await self.db.close()
+
+    def _init(self, user_id: int | None = None) -> str:
+        return _init_data(user_id=user_id if user_id is not None else self.user_id)
+
+    async def _create_ready_batch(self) -> int:
+        response = await self.client.post(
+            "/api/customer-batches",
+            json={"telegram_init_data": self._init()},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        batch_id = response.json()["batch"]["batch_id"]
+        for doc_type in (
+            "passport_main",
+            "passport_registration",
+            "snils",
+            "tin",
+        ):
+            upload = await self.client.post(
+                f"/api/customer-batches/{batch_id}/files",
+                data={
+                    "declared_document_type": doc_type,
+                    "telegram_init_data": self._init(),
+                },
+                files={"file": (f"{doc_type}.jpg", io.BytesIO(TINY_JPEG), "image/jpeg")},
+            )
+            self.assertEqual(upload.status_code, 200, upload.text)
+        return batch_id
+
+    async def _force_recognizing(
+        self,
+        batch_id: int,
+        *,
+        seconds_ago: int,
+        origin: str = "miniapp",
+    ) -> None:
+        async with self.db.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    origin = $3,
+                    processing_started_at = NOW() - make_interval(secs => $4),
+                    updated_at = NOW() - make_interval(secs => $4),
+                    error_message = NULL
+                WHERE id = $1
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.RECOGNIZING,
+                origin,
+                int(seconds_ago),
+            )
+
+    async def test_claim_sets_processing_started_at(self) -> None:
+        batch_id = await self._create_ready_batch()
+        claimed = await self.repo.claim_batch_for_processing(batch_id)
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["status"], CustomerUploadBatchStatus.RECOGNIZING)
+        self.assertIsNotNone(claimed["processing_started_at"])
+
+    async def test_fresh_recognizing_batch_is_not_recovered(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=5)
+        recovered = await self.repo.recover_stale_recognizing_batch(
+            batch_id,
+            stale_after_seconds=60,
+            origin="miniapp",
+        )
+        self.assertIsNone(recovered)
+        row = await self.repo.get_batch_by_id(batch_id)
+        self.assertEqual(row["status"], CustomerUploadBatchStatus.RECOGNIZING)
+
+    async def test_stale_recognizing_batch_becomes_collecting(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=600)
+        recovered = await self.repo.recover_stale_recognizing_batch(
+            batch_id,
+            stale_after_seconds=60,
+            origin="miniapp",
+        )
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered["status"], CustomerUploadBatchStatus.COLLECTING)
+        self.assertEqual(recovered["error_message"], "processing_interrupted")
+
+    async def test_recovery_update_is_atomic(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=600)
+        first = await self.repo.recover_stale_recognizing_batch(
+            batch_id,
+            stale_after_seconds=60,
+            origin="miniapp",
+        )
+        second = await self.repo.recover_stale_recognizing_batch(
+            batch_id,
+            stale_after_seconds=60,
+            origin="miniapp",
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+
+    async def test_foreign_user_cannot_recover_via_status(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=600)
+        response = await self.client.get(
+            f"/api/customer-batches/{batch_id}/status",
+            headers={"X-Telegram-Init-Data": self._init(OTHER_USER)},
+        )
+        self.assertEqual(response.status_code, 403)
+        row = await self.repo.get_batch_by_id(batch_id)
+        self.assertEqual(row["status"], CustomerUploadBatchStatus.RECOGNIZING)
+
+    async def test_status_returns_processing_interrupted_and_allows_retry(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=600)
+        status = await self.client.get(
+            f"/api/customer-batches/{batch_id}/status",
+            headers={"X-Telegram-Init-Data": self._init()},
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        body = status.json()["batch"]
+        self.assertEqual(body["status"], CustomerUploadBatchStatus.COLLECTING)
+        self.assertEqual(body["error_code"], "PROCESSING_INTERRUPTED")
+        self.assertIn("перезапуском", body["error_message"])
+        self.assertTrue(body["can_recognize"])
+
+        before_files = await self.repo.get_batch_files(batch_id)
+        retry = await self.client.post(
+            f"/api/customer-batches/{batch_id}/recognize",
+            json={"telegram_init_data": self._init()},
+        )
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertTrue(retry.json()["started"])
+        after_files = await self.repo.get_batch_files(batch_id)
+        self.assertEqual(len(before_files), 4)
+        self.assertEqual(len(after_files), 4)
+
+    async def test_background_exception_marks_failed(self) -> None:
+        from app.services.miniapp_batch_api_service import run_batch_processing
+
+        batch_id = await self._create_ready_batch()
+        await self.repo.claim_batch_for_processing(batch_id)
+        self.recognition.process_batch = AsyncMock(side_effect=RuntimeError("boom"))
+        await run_batch_processing(
+            batch_id=batch_id,
+            recognition_service=self.recognition,
+            folder_service=self.folder,
+        )
+        row = await self.repo.get_batch_by_id(batch_id)
+        self.assertEqual(row["status"], CustomerUploadBatchStatus.FAILED)
+        self.assertEqual(row["error_message"], "processing_failed")
+
+    async def test_startup_recovery_simulation(self) -> None:
+        from app.services.miniapp_batch_api_service import (
+            recover_stale_miniapp_batches_on_startup,
+        )
+
+        batch_id = await self._create_ready_batch()
+        await self._force_recognizing(batch_id, seconds_ago=600)
+        recovered = await recover_stale_miniapp_batches_on_startup(
+            self.repo,
+            stale_after_seconds=60,
+        )
+        recovered_ids = {int(item["id"]) for item in recovered}
+        self.assertIn(batch_id, recovered_ids)
+        row = await self.repo.get_batch_by_id(batch_id)
+        self.assertEqual(row["status"], CustomerUploadBatchStatus.COLLECTING)
+        self.assertEqual(row["error_message"], "processing_interrupted")
+
+    async def test_terminal_batch_recovery_ignored(self) -> None:
+        batch_id = await self._create_ready_batch()
+        await self.repo.update_batch_status(
+            batch_id,
+            CustomerUploadBatchStatus.CUSTOMER_SAVED,
+        )
+        async with self.db.pool.acquire() as connection:
+            await connection.execute(
+                """
+                UPDATE customer_upload_batches
+                SET processing_started_at = NOW() - make_interval(secs => 600)
+                WHERE id = $1
+                """,
+                batch_id,
+            )
+        recovered = await self.repo.recover_stale_recognizing_batch(
+            batch_id,
+            stale_after_seconds=60,
+            origin="miniapp",
+        )
+        self.assertIsNone(recovered)
+        row = await self.repo.get_batch_by_id(batch_id)
+        self.assertEqual(row["status"], CustomerUploadBatchStatus.CUSTOMER_SAVED)
+
+
 class MiniAppRegressionPagesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.app = create_fastapi_app(

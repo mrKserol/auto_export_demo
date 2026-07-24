@@ -616,6 +616,7 @@ class CustomerUploadBatchRepository:
     async def claim_batch_for_processing(self, batch_id: int) -> dict | None:
         """Atomically move batch from collecting to recognizing.
 
+        Always refreshes processing_started_at so stale recovery uses a fresh clock.
         Returns None when the batch is missing or already left collecting.
         """
         now = datetime.now(timezone.utc)
@@ -626,7 +627,8 @@ class CustomerUploadBatchRepository:
                 SET
                     status = $2,
                     updated_at = $3,
-                    processing_started_at = COALESCE(processing_started_at, $3)
+                    processing_started_at = $3,
+                    error_message = NULL
                 WHERE id = $1
                   AND status = $4
                 RETURNING *;
@@ -637,6 +639,160 @@ class CustomerUploadBatchRepository:
                 CustomerUploadBatchStatus.COLLECTING,
             )
             return _record_to_dict(row)
+
+    async def recover_stale_recognizing_batch(
+        self,
+        batch_id: int,
+        *,
+        stale_after_seconds: int,
+        origin: str | None = None,
+    ) -> dict | None:
+        """Atomically recover one stale recognizing batch back to collecting.
+
+        Does nothing when the batch is fresh, missing, or not recognizing.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            if origin is None:
+                row = await connection.fetchrow(
+                    """
+                    UPDATE customer_upload_batches
+                    SET
+                        status = $2,
+                        error_message = $3,
+                        updated_at = $4,
+                        processing_started_at = NULL
+                    WHERE id = $1
+                      AND status = $5
+                      AND (
+                        (
+                            processing_started_at IS NOT NULL
+                            AND processing_started_at
+                                < ($4::timestamptz - make_interval(secs => $6))
+                        )
+                        OR (
+                            processing_started_at IS NULL
+                            AND updated_at
+                                < ($4::timestamptz - make_interval(secs => $6))
+                        )
+                      )
+                    RETURNING *;
+                    """,
+                    batch_id,
+                    CustomerUploadBatchStatus.COLLECTING,
+                    "processing_interrupted",
+                    now,
+                    CustomerUploadBatchStatus.RECOGNIZING,
+                    int(stale_after_seconds),
+                )
+            else:
+                row = await connection.fetchrow(
+                    """
+                    UPDATE customer_upload_batches
+                    SET
+                        status = $2,
+                        error_message = $3,
+                        updated_at = $4,
+                        processing_started_at = NULL
+                    WHERE id = $1
+                      AND status = $5
+                      AND origin = $7
+                      AND (
+                        (
+                            processing_started_at IS NOT NULL
+                            AND processing_started_at
+                                < ($4::timestamptz - make_interval(secs => $6))
+                        )
+                        OR (
+                            processing_started_at IS NULL
+                            AND updated_at
+                                < ($4::timestamptz - make_interval(secs => $6))
+                        )
+                      )
+                    RETURNING *;
+                    """,
+                    batch_id,
+                    CustomerUploadBatchStatus.COLLECTING,
+                    "processing_interrupted",
+                    now,
+                    CustomerUploadBatchStatus.RECOGNIZING,
+                    int(stale_after_seconds),
+                    origin,
+                )
+            return _record_to_dict(row)
+
+    async def recover_stale_recognizing_batches(
+        self,
+        *,
+        stale_after_seconds: int,
+        origin: str | None = None,
+    ) -> list[dict]:
+        """Recover all stale recognizing batches. Does not start OCR tasks."""
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as connection:
+            if origin is None:
+                rows = await connection.fetch(
+                    """
+                    UPDATE customer_upload_batches
+                    SET
+                        status = $1,
+                        error_message = $2,
+                        updated_at = $3,
+                        processing_started_at = NULL
+                    WHERE status = $4
+                      AND (
+                        (
+                            processing_started_at IS NOT NULL
+                            AND processing_started_at
+                                < ($3::timestamptz - make_interval(secs => $5))
+                        )
+                        OR (
+                            processing_started_at IS NULL
+                            AND updated_at
+                                < ($3::timestamptz - make_interval(secs => $5))
+                        )
+                      )
+                    RETURNING *;
+                    """,
+                    CustomerUploadBatchStatus.COLLECTING,
+                    "processing_interrupted",
+                    now,
+                    CustomerUploadBatchStatus.RECOGNIZING,
+                    int(stale_after_seconds),
+                )
+            else:
+                rows = await connection.fetch(
+                    """
+                    UPDATE customer_upload_batches
+                    SET
+                        status = $1,
+                        error_message = $2,
+                        updated_at = $3,
+                        processing_started_at = NULL
+                    WHERE status = $4
+                      AND origin = $6
+                      AND (
+                        (
+                            processing_started_at IS NOT NULL
+                            AND processing_started_at
+                                < ($3::timestamptz - make_interval(secs => $5))
+                        )
+                        OR (
+                            processing_started_at IS NULL
+                            AND updated_at
+                                < ($3::timestamptz - make_interval(secs => $5))
+                        )
+                      )
+                    RETURNING *;
+                    """,
+                    CustomerUploadBatchStatus.COLLECTING,
+                    "processing_interrupted",
+                    now,
+                    CustomerUploadBatchStatus.RECOGNIZING,
+                    int(stale_after_seconds),
+                    origin,
+                )
+            return [_record_to_dict(row) for row in rows if row is not None]
 
     async def claim_batch_for_file_saving(self, batch_id: int) -> bool:
         """Atomically move batch from recognized to creating_folder.
