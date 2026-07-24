@@ -106,8 +106,50 @@ CREATE TABLE IF NOT EXISTS customers (
     ipain TEXT,
     phone TEXT,
     email TEXT,
+    customer_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+CREATE_CUSTOMER_UPLOAD_BATCHES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS customer_upload_batches (
+    id BIGSERIAL PRIMARY KEY,
+    batch_key TEXT NOT NULL UNIQUE,
+    telegram_chat_id BIGINT NOT NULL,
+    telegram_user_id BIGINT,
+    media_group_id TEXT,
+    status TEXT NOT NULL DEFAULT 'collecting',
+    customer_path TEXT,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processing_started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+"""
+
+CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS customer_upload_batch_files (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL
+        REFERENCES customer_upload_batches(id)
+        ON DELETE CASCADE,
+    telegram_message_id BIGINT,
+    telegram_file_id TEXT,
+    original_filename TEXT,
+    mime_type TEXT,
+    file_extension TEXT,
+    file_size BIGINT,
+    temporary_content BYTEA,
+    detected_document_type TEXT,
+    recognition_status TEXT NOT NULL DEFAULT 'pending',
+    extracted_json JSONB,
+    error_message TEXT,
+    final_yadisk_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(batch_id, telegram_message_id)
 );
 """
 
@@ -234,6 +276,7 @@ ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL = [
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS first_name_translit TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_name_translit TEXT;",
     "ALTER TABLE customers ADD COLUMN IF NOT EXISTS surname_translit TEXT;",
+    "ALTER TABLE customers ADD COLUMN IF NOT EXISTS customer_path TEXT;",
 ]
 
 ENSURE_CUSTOMERS_SPECIFICATION_FK_SQL = """
@@ -299,6 +342,26 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_customers_specification_id ON customers(specification_id);",
     "CREATE INDEX IF NOT EXISTS idx_estimates_customer_id ON estimates(customer_id);",
     "CREATE INDEX IF NOT EXISTS idx_estimates_specification_id ON estimates(specification_id);",
+    """
+    CREATE INDEX IF NOT EXISTS idx_customer_upload_batches_media_group
+    ON customer_upload_batches (
+        telegram_chat_id,
+        telegram_user_id,
+        media_group_id
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_customer_upload_batches_active
+    ON customer_upload_batches (
+        telegram_chat_id,
+        telegram_user_id,
+        status
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_customer_upload_batch_files_batch
+    ON customer_upload_batch_files(batch_id);
+    """,
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -385,6 +448,8 @@ class Database:
             await connection.execute(CREATE_SPECIFICATIONS_TABLE_SQL)
             await connection.execute(CREATE_ESTIMATES_TABLE_SQL)
             await connection.execute(CREATE_MINI_APP_LAUNCH_CODES_TABLE_SQL)
+            await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCHES_TABLE_SQL)
+            await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL)
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
                 await connection.execute(statement)
             for statement in ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL:
@@ -398,9 +463,16 @@ class Database:
             for statement in CREATE_INDEXES_SQL:
                 await connection.execute(statement)
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        return self._pool
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()
+            self._pool = None
 
     async def insert_document(self, metadata: DocumentMetadata) -> int:
         if self._pool is None:
@@ -832,11 +904,12 @@ class Database:
                     registration_address,
                     department_code,
                     specification_id,
+                    customer_path,
                     created_at,
                     updated_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $17
+                    $11, $12, $13, $14, $15, $16, $17, $18, $18
                 )
                 RETURNING *;
                 """,
@@ -856,6 +929,7 @@ class Database:
                 data.get("registration_address"),
                 data.get("department_code"),
                 data.get("specification_id"),
+                data.get("customer_path"),
                 now,
             )
             return _record_to_dict(row)
@@ -878,6 +952,7 @@ class Database:
             "registration_address",
             "department_code",
             "specification_id",
+            "customer_path",
         }
     )
 
