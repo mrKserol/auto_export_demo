@@ -256,7 +256,28 @@ async def handle_customer_delete_spec(
 
     if deleted:
         updated = await database.get_customer_by_id(customer_id)
-        await callback.message.answer("✅ Спецификация удалена\n\n" + await build_customer_card(updated, database))
+        has_est = await customer_has_estimate(updated, database)
+        # if spec removed, explicitly show Add Specification button
+        if not updated.get("specification_id"):
+            add_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Добавить спецификацию",
+                            callback_data=f"customer_add_spec:{customer_id}",
+                        )
+                    ]
+                ]
+            )
+            await callback.message.answer(
+                "✅ Спецификация удалена\n\n" + await build_customer_card(updated, database),
+                reply_markup=add_kb,
+            )
+        else:
+            await callback.message.answer(
+                "✅ Спецификация удалена\n\n" + await build_customer_card(updated, database),
+                reply_markup=build_customer_card_keyboard(updated, is_admin=False, has_estimate=has_est),
+            )
     else:
         await callback.message.answer("Не удалось удалить спецификацию")
     await callback.answer()
