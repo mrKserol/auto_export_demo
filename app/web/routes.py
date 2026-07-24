@@ -341,7 +341,7 @@ async def get_customer_edit_context(
         "last_name_translit": customer.get("last_name_translit"),
         "first_name_translit": customer.get("first_name_translit"),
         "surname_translit": customer.get("surname_translit"),
-        "date_issue": customer.get("date_issue"),
+        "date_issue": None if customer.get("date_issue") is None else (customer.get("date_issue").isoformat() if hasattr(customer.get("date_issue"), "isoformat") else str(customer.get("date_issue"))),
         "by_whom_issued": customer.get("by_whom_issued"),
         "department_code": customer.get("department_code"),
         "registration_address": customer.get("registration_address"),
@@ -404,6 +404,16 @@ async def update_customer_api(
     for field in database._CUSTOMER_UPDATABLE_FIELDS:
         if hasattr(form, field):
             val = getattr(form, field)
+            # normalize date field to ISO string if date object
+            if field == "date_issue" and isinstance(val, (bytes, bytearray)) is False:
+                try:
+                    from datetime import date, datetime
+                    if isinstance(val, date) and not isinstance(val, datetime):
+                        val = val.isoformat()
+                    elif isinstance(val, datetime):
+                        val = val.date().isoformat()
+                except Exception:
+                    pass
             fields[field] = val
 
     # detect changes

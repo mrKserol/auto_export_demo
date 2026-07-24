@@ -11,12 +11,18 @@
   function showError(msg){ if(formError){ formError.hidden=false; formError.textContent=msg; } }
   function showSuccess(msg){ if(formSuccess){ formSuccess.hidden=false; formSuccess.textContent=msg; } }
 
-  if(tg){
-    tg.ready(); tg.expand();
-    if(tg.MainButton){ tg.MainButton.setText("Сохранить данные"); tg.MainButton.show(); tg.MainButton.onClick(()=>form.requestSubmit()); }
+  const isTelegram = Boolean(tg && tg.initData);
+  if (isTelegram) {
+    tg.ready();
+    tg.expand();
+    if (tg.MainButton) {
+      tg.MainButton.setText("Сохранить данные");
+      tg.MainButton.show();
+    }
+    if (fallback) fallback.hidden = true;
   } else {
     // show fallback button in non-Telegram
-    if(fallback) fallback.classList.remove("hidden");
+    if (fallback) fallback.hidden = false;
   }
 
   async function loadContext(){
@@ -44,11 +50,17 @@
     finally{ setLoading(false); }
   }
 
-  function setLoading(v){
+  function setLoading(v) {
     submitting = v;
-    if(fallback) fallback.disabled=v;
-    if(tg && tg.MainButton){
-      if(v){ tg.MainButton.showProgress(); tg.MainButton.disable(); } else { tg.MainButton.hideProgress(); tg.MainButton.enable(); }
+    if (fallback) fallback.disabled = v;
+    if (isTelegram && tg && tg.MainButton) {
+      if (v) {
+        tg.MainButton.showProgress();
+        tg.MainButton.disable();
+      } else {
+        tg.MainButton.hideProgress();
+        tg.MainButton.enable();
+      }
     }
   }
 
@@ -61,36 +73,68 @@
     return obj;
   }
 
-  async function submit(){
-    if(submitting) return;
+  let isSubmitting = false;
+
+  async function submitCustomer() {
+    if (isSubmitting) return;
+    isSubmitting = true;
     clearMessages();
     const token = getContextToken();
-    if(!token){ showError("Откройте форму через кнопку в боте."); return; }
-    if(!tg || !tg.initData){ showError("Откройте форму из Telegram."); return; }
+    if (!token) {
+      showError("Откройте форму через кнопку в боте.");
+      isSubmitting = false;
+      return;
+    }
+    if (!isTelegram) {
+      // allow browser submit but require no initData
+    } else if (!tg || !tg.initData) {
+      showError("Откройте форму из Telegram.");
+      isSubmitting = false;
+      return;
+    }
     const payload = collect();
     setLoading(true);
-    try{
-      const res = await fetch("/api/customers", { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload) });
-      const data = await res.json().catch(()=>({}));
-      if(!res.ok || !data.ok){
+    try {
+      const res = await fetch("/api/customers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
         const err = data.error || {};
-        if(err.fields){
-          // show first field error
+        if (err.fields) {
           const first = Object.values(err.fields)[0];
           showError(first || err.message || "Ошибка сохранения");
+        } else if (err.code === "PASSPORT_ALREADY_EXISTS") {
+          showError(err.message || "Паспорт уже существует");
         } else showError(err.message || "Ошибка сохранения");
         return;
       }
       showSuccess(data.message || "Данные клиента сохранены");
-      try{ if(tg && typeof tg.HapticFeedback !== "undefined") tg.HapticFeedback.notificationOccurred("success"); }catch(_){}
-      setTimeout(()=>{ try{ if(tg && typeof tg.close==="function") tg.close(); }catch(_){ } }, 1200);
-    }catch(e){
+      try {
+        if (isTelegram && tg && typeof tg.HapticFeedback !== "undefined") tg.HapticFeedback.notificationOccurred("success");
+      } catch (_e) {}
+      setTimeout(() => {
+        try { if (isTelegram && tg && typeof tg.close === "function") tg.close(); } catch (_){}
+      }, 1200);
+    } catch (e) {
       showError("Ошибка сети");
-    }finally{ setLoading(false); }
+    } finally {
+      setLoading(false);
+      isSubmitting = false;
+    }
   }
 
-  form.addEventListener("submit", e=>{ e.preventDefault(); submit(); });
-  if(fallback) fallback.addEventListener("click", ()=> submit());
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitCustomer();
+  });
+  if (isTelegram && tg && tg.MainButton) {
+    // bind MainButton to submitCustomer
+    try {
+      tg.MainButton.onClick(submitCustomer);
+    } catch (_e) {
+      // ignore
+    }
+  }
+  // fallback button is type=submit so no click listener needed
   // init
   loadContext();
 })();
