@@ -129,8 +129,10 @@ async def handle_customer_edit_menu(
     callback: CallbackQuery,
     state: FSMContext,
     bot: Bot,
+    database: Database,
 ) -> None:
     # New flow: open customer edit miniapp (replace old FSM menu)
+    await callback.answer()
     if callback.message is None or callback.from_user is None:
         return
 
@@ -143,7 +145,14 @@ async def handle_customer_edit_menu(
 
     customer_id = int(callback.data.split(":", 1)[1])
     from app.config import load_settings
-    from app.services.miniapp_link_service import create_customer_edit_token, build_customer_edit_miniapp_url, build_customer_edit_open_keyboard
+    from app.services.miniapp_entrypoint_service import (
+        PURPOSE_CUSTOMER_EDIT,
+        send_miniapp_entrypoint,
+    )
+    from app.services.miniapp_link_service import (
+        build_customer_edit_miniapp_url,
+        create_customer_edit_token,
+    )
 
     settings = load_settings()
     token = create_customer_edit_token(
@@ -153,27 +162,35 @@ async def handle_customer_edit_menu(
         origin_chat_id=callback.message.chat.id,
     )
     url = build_customer_edit_miniapp_url(settings, token)
-
-    if callback.message.chat.type == "private":
-        logger.info(
-            "Customer edit miniapp allowed customer_id=%s telegram_user_id=%s",
+    try:
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=callback.from_user.id,
+            origin_chat_type=callback.message.chat.type,
+            answer=callback.message.answer,
+            purpose=PURPOSE_CUSTOMER_EDIT,
+            entity_id=customer_id,
+            customer_id=customer_id,
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="✏️ Открыть данные клиента",
+            private_text="Откройте форму с данными клиента:",
+            group_success_text="Форма отправлена вам в личный чат с ботом.",
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to open customer edit miniapp customer_id=%s user_id=%s",
             customer_id,
             callback.from_user.id,
         )
-        await callback.message.answer("Откройте форму с данными клиента:", reply_markup=build_customer_edit_open_keyboard(url))
-        await callback.answer()
-        return
-
-    me = await bot.get_me()
-    bot_username = me.username or ""
-    launch_code = await state.ctx.data.get("database").create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=settings.mini_app_token_ttl_seconds) if False else None
-    deep_link = f"https://t.me/{bot_username}?start=cus_{(launch_code or '')}"
-    try:
-        await bot.send_message(chat_id=callback.from_user.id, text="Откройте форму с данными клиента:", reply_markup=build_customer_edit_open_keyboard(url))
-        await callback.message.answer("Форма отправлена вам в личный чат с ботом.")
-    except Exception:
-        await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=deep_link)]]))
-    await callback.answer()
+        await callback.message.answer(
+            "Не удалось открыть форму. Попробуйте ещё раз."
+        )
 
 
 @router.callback_query(F.data.startswith("customer_edit_back:"))

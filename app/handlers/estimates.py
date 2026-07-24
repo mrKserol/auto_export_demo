@@ -137,6 +137,10 @@ async def handle_estimate_form(callback: CallbackQuery, database: Database, bot:
 
     # Create signed context token for estimate Mini App (purpose=create_estimate)
     from app.config import load_settings
+    from app.services.miniapp_entrypoint_service import (
+        PURPOSE_ESTIMATE,
+        send_miniapp_entrypoint,
+    )
     from app.services.miniapp_link_service import (
         build_estimate_miniapp_url,
         create_customer_estimate_token,
@@ -160,16 +164,38 @@ async def handle_estimate_form(callback: CallbackQuery, database: Database, bot:
             # Fall back to sending a clickable button if direct open fails
             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]])
             await callback.message.answer("Откройте форму сметы:", reply_markup=kb)
-    else:
-        me = await bot.get_me()
-        bot_username = me.username or ""
-        launch_code = await database.create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=600)
-        deep_link = f"https://t.me/{bot_username}?start=est_{launch_code}"
-        try:
-            await bot.send_message(chat_id=callback.from_user.id, text="Откройте форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=deep_link)]]))
-            await callback.message.answer("Форма сметы отправлена вам в личный чат с ботом.")
-        except Exception:
-            await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+            return
+
+    try:
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=callback.from_user.id,
+            origin_chat_type=callback.message.chat.type,
+            answer=callback.message.answer,
+            purpose=PURPOSE_ESTIMATE,
+            entity_id=customer_id,
+            customer_id=customer_id,
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="📊 Открыть форму сметы",
+            private_text="Откройте форму сметы:",
+            group_success_text="Форма сметы отправлена вам в личный чат с ботом.",
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+            ttl_seconds=600,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to open estimate miniapp customer_id=%s user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
+        await callback.message.answer(
+            "Не удалось открыть форму сметы. Попробуйте ещё раз."
+        )
 
 
 @router.callback_query(F.data.startswith("estimate:upload:"))
@@ -212,6 +238,7 @@ async def handle_estimate_photo(
     message: Message,
     state: FSMContext,
     bot: Bot,
+    database: Database,
     estimate_recognition_service: EstimateRecognitionService,
 ) -> None:
     logger.info("handle_estimate_photo called update_id=%s", getattr(message, "message_id", None))
@@ -281,6 +308,10 @@ async def handle_estimate_photo(
     # build prefill payload and URL
     import json, base64
     from app.config import load_settings
+    from app.services.miniapp_entrypoint_service import (
+        PURPOSE_ESTIMATE,
+        send_miniapp_entrypoint,
+    )
     from app.services.miniapp_link_service import create_customer_estimate_token, build_estimate_miniapp_url
 
     settings = load_settings()
@@ -294,18 +325,34 @@ async def handle_estimate_photo(
     prefill_b64 = base64.urlsafe_b64encode(prefill_json.encode("utf-8")).decode("ascii").rstrip("=")
     url = f"{build_estimate_miniapp_url(settings, token)}&prefill={prefill_b64}"
 
-    if message.chat.type == "private":
-        await message.answer("Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", web_app=WebAppInfo(url=url))]]))
-    else:
-        me = await bot.get_me()
-        bot_username = me.username or ""
-        launch_code = await state.ctx.data.get("database").create_mini_app_launch_code(context_token=token, telegram_user_id=message.from_user.id, customer_id=customer_id, ttl_seconds=600) if False else None
-        # fallback: send deep link if possible
-        try:
-            await bot.send_message(chat_id=message.from_user.id, text="Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=url)]]))
-            await message.answer("Форма сметы отправлена вам в личный чат с ботом.")
-        except Exception:
-            await message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+    try:
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=message.from_user.id,
+            origin_chat_type=message.chat.type,
+            answer=message.answer,
+            purpose=PURPOSE_ESTIMATE,
+            entity_id=int(customer_id) if customer_id is not None else 0,
+            customer_id=int(customer_id) if customer_id is not None else None,
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="📊 Открыть форму сметы",
+            private_text="Откройте предзаполненную форму сметы:",
+            group_success_text="Форма сметы отправлена вам в личный чат с ботом.",
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+            ttl_seconds=600,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to open prefilled estimate miniapp customer_id=%s user_id=%s",
+            customer_id,
+            message.from_user.id,
+        )
+        await message.answer("Не удалось открыть форму сметы. Попробуйте ещё раз.")
 
     await state.clear()
 
@@ -318,6 +365,7 @@ async def handle_estimate_document(
     message: Message,
     state: FSMContext,
     bot: Bot,
+    database: Database,
     estimate_recognition_service: EstimateRecognitionService,
 ) -> None:
     if message.from_user is None:
@@ -402,6 +450,10 @@ async def handle_estimate_document(
     # build prefill url similar to photo handler
     import json, base64
     from app.config import load_settings
+    from app.services.miniapp_entrypoint_service import (
+        PURPOSE_ESTIMATE,
+        send_miniapp_entrypoint,
+    )
     from app.services.miniapp_link_service import create_customer_estimate_token, build_estimate_miniapp_url
 
     settings = load_settings()
@@ -415,10 +467,33 @@ async def handle_estimate_document(
     prefill_b64 = base64.urlsafe_b64encode(prefill_json.encode("utf-8")).decode("ascii").rstrip("=")
     url = f"{build_estimate_miniapp_url(settings, token)}&prefill={prefill_b64}"
     try:
-        await bot.send_message(chat_id=message.from_user.id, text="Откройте предзаполненную форму сметы:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📊 Открыть форму сметы", url=url)]]))
-        await message.answer("Форма сметы отправлена вам в личный чат с ботом.")
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=message.from_user.id,
+            origin_chat_type=message.chat.type,
+            answer=message.answer,
+            purpose=PURPOSE_ESTIMATE,
+            entity_id=int(customer_id) if customer_id is not None else 0,
+            customer_id=int(customer_id) if customer_id is not None else None,
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="📊 Открыть форму сметы",
+            private_text="Откройте предзаполненную форму сметы:",
+            group_success_text="Форма сметы отправлена вам в личный чат с ботом.",
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+            ttl_seconds=600,
+        )
     except Exception:
-        await message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.")
+        logger.exception(
+            "Failed to open prefilled estimate miniapp customer_id=%s user_id=%s",
+            customer_id,
+            message.from_user.id,
+        )
+        await message.answer("Не удалось открыть форму сметы. Попробуйте ещё раз.")
 
     await state.clear()
 

@@ -413,14 +413,16 @@ class CustomerFolderServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         callback = MagicMock()
         callback.from_user = SimpleNamespace(id=20)
         callback.message = MagicMock()
-        callback.message.chat = SimpleNamespace(id=10)
+        callback.message.chat = SimpleNamespace(id=10, type="private")
         callback.message.answer = AsyncMock()
         callback.answer = AsyncMock()
         state = AsyncMock()
         state.get_data = AsyncMock(return_value={"batch_id": batch["id"]})
         state.update_data = AsyncMock()
         settings = _settings(database_url=self.database_url)
-        await handle_batch_edit(callback, state, settings, self.repo)
+        await handle_batch_edit(
+            callback, state, settings, self.repo, AsyncMock(), self.db
+        )
         text = callback.message.answer.await_args.args[0]
         self.assertIn("Данные клиента", text)
         markup = callback.message.answer.await_args.kwargs["reply_markup"]

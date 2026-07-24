@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 
 from app.services.customer_extraction_service import (
+    extract_birth_date_from_ocr,
+    extract_birth_place_from_ocr,
     extract_passport_main_fields,
     extract_registration_fields,
     extract_snils_fields,
@@ -729,6 +731,8 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         "by_whom_issued": _clean_passport_issuer(gpt_json.get("by_whom_issued")),
         "date_issue": normalize_date(_clean_text(gpt_json.get("date_issue"))),
         "department_code": normalize_department_code(_clean_text(gpt_json.get("department_code"))),
+        "birth_date": normalize_date(_clean_text(gpt_json.get("birth_date"))),
+        "birth_place": _normalize_birth_place(gpt_json.get("birth_place")),
     }
 
     fallback = extract_passport_main_fields({"ocr_text": text_without_mrz})
@@ -738,6 +742,10 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         if value and not fields.get(key):
             if key == "by_whom_issued":
                 fields[key] = _clean_passport_issuer(value)
+            elif key == "birth_place":
+                fields[key] = _normalize_birth_place(value)
+            elif key == "birth_date":
+                fields[key] = normalize_date(_clean_text(value))
             else:
                 fields[key] = value
 
@@ -748,6 +756,12 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         fields["date_issue"] = _extract_issue_date_fallback(ocr_text)
     if not fields.get("date_issue"):
         fields["date_issue"] = normalize_date(ocr_text)
+
+    if not fields.get("birth_date"):
+        # TODO: optional MRZ YYMMDD cross-check for birth_date (not used as primary source yet).
+        fields["birth_date"] = _extract_birth_date_fallback(text_without_mrz)
+    if not fields.get("birth_place"):
+        fields["birth_place"] = _extract_birth_place_fallback(text_without_mrz)
 
     if not fields.get("department_code"):
         fields["department_code"] = _extract_department_code_fallback(ocr_text)
@@ -768,6 +782,23 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         logger.warning("Passport number not found after passport main extraction")
 
     return {key: value for key, value in fields.items() if value}
+
+
+def _normalize_birth_place(value: object) -> str | None:
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+    cleaned = re.sub(r"[\r\n]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or None
+
+
+def _extract_birth_date_fallback(ocr_text: str) -> str | None:
+    return extract_birth_date_from_ocr(ocr_text)
+
+
+def _extract_birth_place_fallback(ocr_text: str) -> str | None:
+    return _normalize_birth_place(extract_birth_place_from_ocr(ocr_text))
 
 
 def _clean_passport_issuer(value: str | None) -> str | None:

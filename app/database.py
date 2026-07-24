@@ -246,11 +246,17 @@ CREATE TABLE IF NOT EXISTS mini_app_launch_codes (
     code TEXT PRIMARY KEY,
     context_token TEXT NOT NULL,
     telegram_user_id BIGINT NOT NULL,
-    customer_id BIGINT NOT NULL,
+    customer_id BIGINT,
+    purpose TEXT,
     exp TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
+
+ENSURE_MINI_APP_LAUNCH_CODES_COLUMNS_SQL = [
+    "ALTER TABLE mini_app_launch_codes ALTER COLUMN customer_id DROP NOT NULL;",
+    "ALTER TABLE mini_app_launch_codes ADD COLUMN IF NOT EXISTS purpose TEXT;",
+]
 
 ENSURE_ESTIMATES_CUSTOMS_COLUMNS_SQL = [
     "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS customs_sbor NUMERIC(14, 2) DEFAULT 0;",
@@ -478,6 +484,11 @@ class Database:
             await connection.execute(CREATE_MINI_APP_LAUNCH_CODES_TABLE_SQL)
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCHES_TABLE_SQL)
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL)
+            for statement in ENSURE_MINI_APP_LAUNCH_CODES_COLUMNS_SQL:
+                try:
+                    await connection.execute(statement)
+                except asyncpg.UndefinedTableError:
+                    pass
             for statement in ENSURE_CUSTOMERS_EXTRA_FIELDS_SQL:
                 await connection.execute(statement)
             for statement in ENSURE_CUSTOMER_UPLOAD_BATCHES_COLUMNS_SQL:
@@ -1180,8 +1191,9 @@ class Database:
         *,
         context_token: str,
         telegram_user_id: int,
-        customer_id: int,
         ttl_seconds: int,
+        customer_id: int | None = None,
+        purpose: str | None = None,
     ) -> str:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
@@ -1192,13 +1204,14 @@ class Database:
             await connection.execute(
                 """
                 INSERT INTO mini_app_launch_codes (
-                    code, context_token, telegram_user_id, customer_id, exp
-                ) VALUES ($1, $2, $3, $4, $5);
+                    code, context_token, telegram_user_id, customer_id, purpose, exp
+                ) VALUES ($1, $2, $3, $4, $5, $6);
                 """,
                 code,
                 context_token,
                 int(telegram_user_id),
-                int(customer_id),
+                int(customer_id) if customer_id is not None else None,
+                purpose,
                 exp,
             )
         return code
@@ -1208,6 +1221,7 @@ class Database:
         code: str,
         *,
         telegram_user_id: int,
+        expected_purpose: str | None = None,
     ) -> dict | None:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
@@ -1216,7 +1230,7 @@ class Database:
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    SELECT code, context_token, telegram_user_id, customer_id, exp
+                    SELECT code, context_token, telegram_user_id, customer_id, purpose, exp
                     FROM mini_app_launch_codes
                     WHERE code = $1
                     FOR UPDATE;
@@ -1234,6 +1248,8 @@ class Database:
                 if int(row["telegram_user_id"]) != int(telegram_user_id):
                     return None
                 if row["exp"] < datetime.now(timezone.utc):
+                    return None
+                if expected_purpose is not None and (row["purpose"] or "") != expected_purpose:
                     return None
 
                 return _record_to_dict(row)

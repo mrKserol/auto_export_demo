@@ -25,14 +25,15 @@ from app.services.customer_card_service import (
     customer_has_estimate,
 )
 from app.services.estimate_service import DEFAULT_PRICE_CURRENCY
+from app.services.miniapp_entrypoint_service import (
+    PURPOSE_SPECIFICATION,
+    send_miniapp_entrypoint,
+)
 from app.services.miniapp_link_service import (
-    build_deep_link_keyboard,
-    build_miniapp_open_keyboard,
-    build_specification_deep_link,
-    build_specification_miniapp_url,
-    create_customer_specification_token,
-    create_customer_specification_edit_token,
     build_specification_edit_miniapp_url,
+    build_specification_miniapp_url,
+    create_customer_specification_edit_token,
+    create_customer_specification_token,
 )
 from app.services.specification_edit_service import (
     SPEC_FIELD_LABELS,
@@ -143,58 +144,38 @@ async def handle_customer_add_spec(
     )
     miniapp_url = build_specification_miniapp_url(settings, token)
 
-    if callback.message.chat.type == "private":
-        logger.info(
-            "Sending specification mini app button in private chat "
-            "customer_id=%s telegram_user_id=%s",
-            customer_id,
-            callback.from_user.id,
-        )
-        await callback.message.answer(
-            "Откройте форму спецификации:",
-            reply_markup=build_miniapp_open_keyboard(miniapp_url),
-        )
-        await callback.answer()
-        return
-
-    me = await bot.get_me()
-    bot_username = me.username or ""
-    launch_code = await database.create_mini_app_launch_code(
-        context_token=token,
-        telegram_user_id=callback.from_user.id,
-        customer_id=customer_id,
-        ttl_seconds=settings.mini_app_token_ttl_seconds,
-    )
-    deep_link = build_specification_deep_link(bot_username, launch_code)
-
+    await callback.answer()
     try:
-        await bot.send_message(
-            chat_id=callback.from_user.id,
-            text="Откройте форму спецификации:",
-            reply_markup=build_miniapp_open_keyboard(miniapp_url),
-        )
-        await callback.message.answer(
-            "Форма спецификации отправлена вам в личный чат с ботом."
-        )
-        logger.info(
-            "Sent specification mini app to private chat from group "
-            "customer_id=%s telegram_user_id=%s",
-            customer_id,
-            callback.from_user.id,
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=callback.from_user.id,
+            origin_chat_type=callback.message.chat.type,
+            answer=callback.message.answer,
+            purpose=PURPOSE_SPECIFICATION,
+            entity_id=customer_id,
+            customer_id=customer_id,
+            context_token=token,
+            miniapp_url=miniapp_url,
+            open_button_text="📝 Открыть форму спецификации",
+            private_text="Откройте форму спецификации:",
+            group_success_text=(
+                "Форма спецификации отправлена вам в личный чат с ботом."
+            ),
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
         )
     except Exception:
-        logger.info(
-            "Cannot DM user, sending deep-link in group "
-            "customer_id=%s telegram_user_id=%s",
+        logger.exception(
+            "Failed to open specification miniapp customer_id=%s user_id=%s",
             customer_id,
             callback.from_user.id,
         )
         await callback.message.answer(
-            "Чтобы заполнить спецификацию, откройте личный чат с ботом по кнопке ниже.",
-            reply_markup=build_deep_link_keyboard(deep_link),
+            "Не удалось открыть форму спецификации. Попробуйте ещё раз."
         )
-
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("customer_edit_spec:"))
@@ -379,9 +360,7 @@ async def _open_specification_edit_miniapp(
         await callback.message.answer("Спецификация клиента не найдена.")
         return
 
-    # create edit token and URL
     from app.config import load_settings
-    from app.services.miniapp_link_service import create_customer_specification_edit_token, build_specification_edit_miniapp_url, build_specification_edit_open_keyboard
 
     settings = load_settings()
     token = create_customer_specification_edit_token(
@@ -391,22 +370,35 @@ async def _open_specification_edit_miniapp(
         origin_chat_id=callback.message.chat.id,
     )
     url = build_specification_edit_miniapp_url(settings, token)
-
-    if callback.message.chat.type == "private":
-        await callback.message.answer("Откройте форму для редактирования спецификации:", reply_markup=build_specification_edit_open_keyboard(url))
-        await callback.answer()
-        return
-
-    me = await callback.bot.get_me()
-    bot_username = me.username or ""
-    launch_code = await database.create_mini_app_launch_code(context_token=token, telegram_user_id=callback.from_user.id, customer_id=customer_id, ttl_seconds=settings.mini_app_token_ttl_seconds)
-    deep_link = build_specification_deep_link(bot_username, launch_code)
     try:
-        await callback.bot.send_message(chat_id=callback.from_user.id, text="Откройте форму для редактирования спецификации:", reply_markup=build_specification_edit_open_keyboard(url))
-        await callback.message.answer("Форма отправлена вам в личный чат с ботом.")
+        await send_miniapp_entrypoint(
+            callback.bot,
+            database=database,
+            settings=settings,
+            user_id=callback.from_user.id,
+            origin_chat_type=callback.message.chat.type,
+            answer=callback.message.answer,
+            purpose=PURPOSE_SPECIFICATION,
+            entity_id=customer_id,
+            customer_id=customer_id,
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="✏️ Открыть спецификацию",
+            private_text="Откройте форму для редактирования спецификации:",
+            group_success_text="Форма отправлена вам в личный чат с ботом.",
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+        )
     except Exception:
-        await callback.message.answer("Не удалось отправить личное сообщение. Откройте личный чат с ботом и используйте /start.", reply_markup=build_deep_link_keyboard(deep_link))
-    await callback.answer()
+        logger.exception(
+            "Failed to open specification edit miniapp customer_id=%s user_id=%s",
+            customer_id,
+            callback.from_user.id,
+        )
+        await callback.message.answer(
+            "Не удалось открыть форму спецификации. Попробуйте ещё раз."
+        )
 
 
 @router.callback_query(F.data.startswith("spec_edit_back:"))

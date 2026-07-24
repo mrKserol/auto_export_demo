@@ -36,7 +36,7 @@ def _callback() -> MagicMock:
     callback = MagicMock()
     callback.from_user = SimpleNamespace(id=20)
     callback.message = MagicMock()
-    callback.message.chat = SimpleNamespace(id=10)
+    callback.message.chat = SimpleNamespace(id=10, type="private")
     callback.message.answer = AsyncMock()
     callback.answer = AsyncMock()
     return callback
@@ -357,7 +357,9 @@ class CustomerBatchReliabilityTests(unittest.IsolatedAsyncioTestCase):
         settings.mini_app_base_url = "https://example.com"
         settings.mini_app_token_secret = "secret"
         settings.mini_app_token_ttl_seconds = 900
-        await handle_batch_edit(callback, state, settings, self.repo)
+        await handle_batch_edit(
+            callback, state, settings, self.repo, AsyncMock(), self.db
+        )
         text = callback.message.answer.await_args.args[0]
         self.assertIn("после сохранения", text)
         self.assertNotIn("reply_markup", callback.message.answer.await_args.kwargs)
@@ -391,12 +393,17 @@ class CustomerBatchReliabilityTests(unittest.IsolatedAsyncioTestCase):
             telegram_init_data_max_age_seconds=900,
             customer_upload_max_file_bytes=1024,
         )
-        await handle_batch_edit(callback, state, settings, self.repo)
+        bot = AsyncMock()
+        await handle_batch_edit(
+            callback, state, settings, self.repo, bot, self.db
+        )
         first_url = callback.message.answer.await_args.kwargs[
             "reply_markup"
         ].inline_keyboard[0][0].web_app.url
         callback.message.answer.reset_mock()
-        await handle_batch_edit(callback, state, settings, self.repo)
+        await handle_batch_edit(
+            callback, state, settings, self.repo, bot, self.db
+        )
         second_url = callback.message.answer.await_args.kwargs[
             "reply_markup"
         ].inline_keyboard[0][0].web_app.url

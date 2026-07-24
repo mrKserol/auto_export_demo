@@ -13,10 +13,10 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    WebAppInfo,
 )
 
 from app.config import Settings
+from app.database import Database
 from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
 )
@@ -40,6 +40,10 @@ from app.services.customer_folder_service import (
     ALREADY_SAVING_OR_SAVED,
     BATCH_ABANDONED,
     CustomerFolderService,
+)
+from app.services.miniapp_entrypoint_service import (
+    PURPOSE_EDIT_BATCH,
+    send_miniapp_entrypoint,
 )
 from app.services.miniapp_link_service import (
     build_customer_edit_miniapp_url,
@@ -330,9 +334,11 @@ async def handle_batch_edit(
     state: FSMContext,
     settings: Settings,
     customer_upload_batch_repository: CustomerUploadBatchRepository,
+    bot: Bot,
+    database: Database,
 ) -> None:
+    await callback.answer()
     if callback.message is None or callback.from_user is None:
-        await callback.answer()
         return
 
     batch = await _resolve_batch_for_callback(
@@ -345,17 +351,14 @@ async def handle_batch_edit(
             "Активный пакет документов не найден.\n"
             "Начните заново командой /add_customer"
         )
-        await callback.answer()
         return
 
     if batch["status"] == CustomerUploadBatchStatus.ABANDONED:
         await callback.message.answer("Загрузка клиента отменена.")
-        await callback.answer()
         return
 
     if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
         await callback.message.answer("Клиент уже сохранён.")
-        await callback.answer()
         return
 
     if batch["status"] not in {
@@ -365,7 +368,6 @@ async def handle_batch_edit(
         await callback.message.answer(
             "Форма ручной коррекции доступна после сохранения документов."
         )
-        await callback.answer()
         return
 
     token = create_customer_batch_token(
@@ -380,20 +382,38 @@ async def handle_batch_edit(
             int(batch["id"])
         )
     await state.update_data(batch_id=batch["id"])
-    await callback.message.answer(
-        "Откройте форму «Данные клиента» и проверьте распознанные поля.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📝 Ручная коррекция",
-                        web_app=WebAppInfo(url=url),
-                    )
-                ]
-            ]
-        ),
-    )
-    await callback.answer()
+    try:
+        await send_miniapp_entrypoint(
+            bot,
+            database=database,
+            settings=settings,
+            user_id=callback.from_user.id,
+            origin_chat_type=callback.message.chat.type,
+            answer=callback.message.answer,
+            purpose=PURPOSE_EDIT_BATCH,
+            entity_id=int(batch["id"]),
+            context_token=token,
+            miniapp_url=url,
+            open_button_text="📝 Открыть данные клиента",
+            private_text=(
+                "Откройте форму «Данные клиента» и проверьте распознанные поля."
+            ),
+            group_success_text=(
+                "Форма ручной коррекции отправлена вам в личные сообщения."
+            ),
+            deep_link_group_text=(
+                "Чтобы открыть форму, сначала перейдите в личный чат с ботом:"
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to open customer batch edit form batch_id=%s user_id=%s",
+            batch["id"],
+            callback.from_user.id,
+        )
+        await callback.message.answer(
+            "Не удалось открыть форму ручной коррекции. Попробуйте ещё раз."
+        )
 
 
 @router.callback_query(F.data == "customer_batch:cancel")

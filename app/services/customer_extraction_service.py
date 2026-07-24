@@ -33,6 +33,8 @@ PASSPORT_MAIN_FIELDS = (
     "by_whom_issued",
     "date_issue",
     "department_code",
+    "birth_date",
+    "birth_place",
 )
 
 _ISSUED_BY_MARKERS = ("кем выдан", "выдан", "уфмс", "гу мвд", "мвд")
@@ -44,6 +46,8 @@ _REGISTRATION_MARKERS = (
     "регистрация",
 )
 _DATE_MARKERS = ("дата выдачи", "выдан")
+_BIRTH_DATE_MARKERS = ("дата рождения",)
+_BIRTH_PLACE_MARKERS = ("место рождения",)
 
 
 def extract_customer_fields_from_response(response_json: dict) -> dict:
@@ -386,6 +390,16 @@ def _extract_from_flat_text(
         if date_value:
             fields["date_issue"] = date_value
 
+    if include_passport_details and not fields.get("birth_date"):
+        birth_date = _extract_birth_date_from_ocr(ocr_text)
+        if birth_date:
+            fields["birth_date"] = birth_date
+
+    if include_passport_details and not fields.get("birth_place"):
+        birth_place = _extract_birth_place_from_ocr(ocr_text)
+        if birth_place:
+            fields["birth_place"] = birth_place
+
     if include_passport_details and not fields.get("by_whom_issued"):
         issued_by = _extract_issued_by(ocr_text)
         if issued_by:
@@ -447,10 +461,83 @@ def _extract_date_near_markers(text: str, markers: tuple[str, ...]) -> str | Non
         if index == -1:
             continue
         fragment = text[index : index + 120]
+        if marker == "дата рождения":
+            issue_idx = fragment.lower().find("дата выдачи")
+            if issue_idx != -1:
+                fragment = fragment[:issue_idx]
         normalized = normalize_date(fragment)
         if normalized:
             return normalized
-    return normalize_date(text)
+    return None
+
+
+def extract_birth_date_from_ocr(text: str) -> str | None:
+    lines = [line.strip() for line in (text or "").splitlines() if line and line.strip()]
+    for index, line in enumerate(lines):
+        normalized = line.upper().replace("Ё", "Е")
+        if "ДАТА РОЖДЕНИЯ" not in normalized and "ДАТА РОЖД" not in normalized:
+            continue
+        if "ВЫДАЧ" in normalized:
+            continue
+        date_match = re.search(r"\b\d{2}[.\-/]\d{2}[.\-/]\d{4}\b", line)
+        if date_match:
+            return normalize_date(date_match.group(0))
+        for next_line in lines[index + 1 : index + 4]:
+            next_norm = next_line.upper().replace("Ё", "Е")
+            if "ДАТА ВЫДАЧИ" in next_norm or "МЕСТО РОЖДЕНИЯ" in next_norm:
+                break
+            if "КЕМ ВЫДАН" in next_norm or "КОД ПОДРАЗДЕЛЕНИЯ" in next_norm:
+                break
+            date_match = re.search(r"\b\d{2}[.\-/]\d{2}[.\-/]\d{4}\b", next_line)
+            if date_match:
+                return normalize_date(date_match.group(0))
+    # Marker-scoped search only — do not fall back to any date in the document.
+    return _extract_date_near_markers(text, _BIRTH_DATE_MARKERS)
+
+
+def extract_birth_place_from_ocr(text: str) -> str | None:
+    lines = [line.strip() for line in (text or "").splitlines() if line and line.strip()]
+    collected: list[str] = []
+    capturing = False
+    for line in lines:
+        normalized = line.upper().replace("Ё", "Е")
+        if "МЕСТО РОЖДЕНИЯ" in normalized:
+            capturing = True
+            same_line = re.sub(
+                r"(?i).*?место\s+рождения[:\s-]*",
+                "",
+                line,
+            ).strip(" :-\t")
+            if same_line:
+                collected.append(same_line)
+            continue
+        if not capturing:
+            continue
+        if "<<" in normalized or "PNRUS" in normalized:
+            break
+        if "ДАТА ВЫДАЧИ" in normalized or "КЕМ ВЫДАН" in normalized:
+            break
+        if "КОД ПОДРАЗДЕЛЕНИЯ" in normalized:
+            break
+        if "ПАСПОРТ ВЫДАН" in normalized:
+            break
+        if re.search(r"\d{3}-\d{3}", line):
+            break
+        if len(line) >= 2:
+            collected.append(line)
+        if len(collected) >= 4:
+            break
+    if not collected:
+        return None
+    return re.sub(r"\s+", " ", " ".join(collected)).strip() or None
+
+
+def _extract_birth_date_from_ocr(text: str) -> str | None:
+    return extract_birth_date_from_ocr(text)
+
+
+def _extract_birth_place_from_ocr(text: str) -> str | None:
+    return extract_birth_place_from_ocr(text)
 
 
 def _extract_issued_by(text: str) -> str | None:
