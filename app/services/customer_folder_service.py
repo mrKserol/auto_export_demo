@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import logging
 import re
@@ -12,7 +13,6 @@ from app.repositories.customer_upload_batch_statuses import (
     CustomerUploadBatchStatus,
 )
 from app.services.customer_batch_data_service import (
-    extract_fields_from_file_row,
     get_passport_main_identity,
 )
 from app.yadisk_client import YandexDiskClient
@@ -30,6 +30,20 @@ DOCUMENT_TYPE_BASE_NAMES = {
 }
 
 MAX_FOLDER_SUFFIX = 50
+ALREADY_SAVING_OR_SAVED = "already_saving_or_saved"
+BATCH_ABANDONED = "batch_abandoned"
+
+_batch_file_save_locks: dict[int, asyncio.Lock] = {}
+_batch_file_save_locks_guard = asyncio.Lock()
+
+
+async def _lock_for_batch(batch_id: int) -> asyncio.Lock:
+    async with _batch_file_save_locks_guard:
+        lock = _batch_file_save_locks.get(batch_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _batch_file_save_locks[batch_id] = lock
+        return lock
 
 
 @dataclass
@@ -98,23 +112,88 @@ class CustomerFolderService:
         )
 
     async def ensure_batch_files_saved(self, batch_id: int) -> FolderFinalizeResult:
+        lock = await _lock_for_batch(batch_id)
+        async with lock:
+            return await self._ensure_batch_files_saved_locked(batch_id)
+
+    async def _ensure_batch_files_saved_locked(
+        self,
+        batch_id: int,
+    ) -> FolderFinalizeResult:
         batch = await self.repository.get_batch_by_id(batch_id)
         if batch is None:
             raise LookupError(f"customer_upload_batch id={batch_id} not found")
 
-        if batch["status"] in {
+        status = batch["status"]
+        if status == CustomerUploadBatchStatus.ABANDONED:
+            return FolderFinalizeResult(
+                batch_id=batch_id,
+                customer_path=batch.get("customer_path"),
+                uploaded_count=0,
+                skipped_count=0,
+                failed_count=0,
+                status=status,
+                error_message=BATCH_ABANDONED,
+            )
+
+        if status in {
             CustomerUploadBatchStatus.FILES_SAVED,
             CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
             CustomerUploadBatchStatus.CUSTOMER_SAVED,
-        } and batch.get("customer_path"):
+            CustomerUploadBatchStatus.CREATING_FOLDER,
+            CustomerUploadBatchStatus.UPLOADING,
+        }:
             return FolderFinalizeResult(
                 batch_id=batch_id,
                 customer_path=batch.get("customer_path"),
                 uploaded_count=0,
                 skipped_count=await self.repository.count_batch_files(batch_id),
                 failed_count=0,
-                status=batch["status"],
+                status=status,
+                error_message=ALREADY_SAVING_OR_SAVED,
             )
+
+        if status != CustomerUploadBatchStatus.RECOGNIZED:
+            return FolderFinalizeResult(
+                batch_id=batch_id,
+                customer_path=batch.get("customer_path"),
+                uploaded_count=0,
+                skipped_count=0,
+                failed_count=0,
+                status=status,
+                error_message=f"unexpected_status:{status}",
+            )
+
+        claimed = await self.repository.claim_batch_for_file_saving(batch_id)
+        if not claimed:
+            refreshed = await self.repository.get_batch_by_id(batch_id)
+            if (
+                refreshed is not None
+                and refreshed["status"] == CustomerUploadBatchStatus.ABANDONED
+            ):
+                return await self._abandoned_result(batch_id)
+            current = (
+                refreshed["status"]
+                if refreshed is not None
+                else CustomerUploadBatchStatus.RECOGNIZED
+            )
+            return FolderFinalizeResult(
+                batch_id=batch_id,
+                customer_path=(
+                    refreshed.get("customer_path") if refreshed else None
+                ),
+                uploaded_count=0,
+                skipped_count=0,
+                failed_count=0,
+                status=current,
+                error_message=ALREADY_SAVING_OR_SAVED,
+            )
+        batch = await self.repository.get_batch_by_id(batch_id)
+        if batch is None:
+            raise LookupError(f"customer_upload_batch id={batch_id} not found")
+
+        if await self._is_abandoned(batch_id):
+            return await self._abandoned_result(batch_id)
 
         files = await self.repository.get_batch_files(batch_id)
         identity = get_passport_main_identity(files)
@@ -131,17 +210,22 @@ class CustomerFolderService:
 
         customer_path = batch.get("customer_path")
         if not customer_path:
-            await self.repository.update_batch_status(
-                batch_id,
-                CustomerUploadBatchStatus.CREATING_FOLDER,
-            )
+            if await self._is_abandoned(batch_id):
+                return await self._abandoned_result(batch_id)
             customer_path = await self.create_unique_customer_folder(
                 last_name=identity["last_name"],
                 passport=identity["passport"],
             )
+            if await self._is_abandoned(batch_id):
+                return await self._abandoned_result(batch_id)
             await self.repository.set_batch_customer_path(batch_id, customer_path)
         else:
+            if await self._is_abandoned(batch_id):
+                return await self._abandoned_result(batch_id)
             await self.yandex_disk_client.ensure_directory(customer_path)
+
+        if await self._is_abandoned(batch_id):
+            return await self._abandoned_result(batch_id)
 
         await self.repository.update_batch_status(
             batch_id,
@@ -152,8 +236,39 @@ class CustomerFolderService:
             customer_path=customer_path,
         )
 
+        if upload_result.error_message == BATCH_ABANDONED:
+            return upload_result
+
+        if await self._is_abandoned(batch_id):
+            return await self._abandoned_result(
+                batch_id,
+                uploaded_count=upload_result.uploaded_count,
+                skipped_count=upload_result.skipped_count,
+                failed_count=upload_result.failed_count,
+                uploaded_paths=upload_result.uploaded_paths,
+                customer_path=customer_path,
+            )
+
         if upload_result.failed_count == 0:
+            if await self._is_abandoned(batch_id):
+                return await self._abandoned_result(
+                    batch_id,
+                    uploaded_count=upload_result.uploaded_count,
+                    skipped_count=upload_result.skipped_count,
+                    failed_count=upload_result.failed_count,
+                    uploaded_paths=upload_result.uploaded_paths,
+                    customer_path=customer_path,
+                )
             await self.repository.clear_batch_file_contents(batch_id)
+            if await self._is_abandoned(batch_id):
+                return await self._abandoned_result(
+                    batch_id,
+                    uploaded_count=upload_result.uploaded_count,
+                    skipped_count=upload_result.skipped_count,
+                    failed_count=upload_result.failed_count,
+                    uploaded_paths=upload_result.uploaded_paths,
+                    customer_path=customer_path,
+                )
             await self.repository.update_batch_status(
                 batch_id,
                 CustomerUploadBatchStatus.FILES_SAVED,
@@ -161,7 +276,8 @@ class CustomerFolderService:
             status = CustomerUploadBatchStatus.FILES_SAVED
             error_message = None
         else:
-            status = CustomerUploadBatchStatus.UPLOADING
+            # Allow a later callback to claim again and finish remaining files.
+            status = CustomerUploadBatchStatus.RECOGNIZED
             error_message = (
                 f"upload_partial_failure failed={upload_result.failed_count}"
             )
@@ -198,10 +314,30 @@ class CustomerFolderService:
         uploaded_paths: list[str] = []
 
         for file_row in files:
+            if await self._is_abandoned(batch_id):
+                return FolderFinalizeResult(
+                    batch_id=batch_id,
+                    customer_path=customer_path,
+                    uploaded_count=uploaded_count,
+                    skipped_count=skipped_count,
+                    failed_count=failed_count,
+                    status=CustomerUploadBatchStatus.ABANDONED,
+                    error_message=BATCH_ABANDONED,
+                    uploaded_paths=uploaded_paths,
+                )
+
             file_id = int(file_row["id"])
             existing_path = file_row.get("final_yadisk_path")
             if existing_path:
                 skipped_count += 1
+                uploaded_paths.append(existing_path)
+                logger.info(
+                    "customer batch file skipped_existing batch_id=%s file_id=%s "
+                    "path=%s",
+                    batch_id,
+                    file_id,
+                    existing_path,
+                )
                 continue
 
             content = file_row.get("temporary_content")
@@ -227,6 +363,13 @@ class CustomerFolderService:
                     await self.repository.clear_file_temporary_content(file_id)
                     skipped_count += 1
                     uploaded_paths.append(disk_path)
+                    logger.info(
+                        "customer batch file skipped_existing batch_id=%s "
+                        "file_id=%s path=%s",
+                        batch_id,
+                        file_id,
+                        disk_path,
+                    )
                     continue
 
                 uploaded_path = await self.yandex_disk_client.upload_bytes(
@@ -261,6 +404,39 @@ class CustomerFolderService:
             failed_count=failed_count,
             status=CustomerUploadBatchStatus.UPLOADING,
             uploaded_paths=uploaded_paths,
+        )
+
+    async def _is_abandoned(self, batch_id: int) -> bool:
+        batch = await self.repository.get_batch_by_id(batch_id)
+        return (
+            batch is not None
+            and batch["status"] == CustomerUploadBatchStatus.ABANDONED
+        )
+
+    async def _abandoned_result(
+        self,
+        batch_id: int,
+        *,
+        uploaded_count: int = 0,
+        skipped_count: int = 0,
+        failed_count: int = 0,
+        uploaded_paths: list[str] | None = None,
+        customer_path: str | None = None,
+    ) -> FolderFinalizeResult:
+        batch = await self.repository.get_batch_by_id(batch_id)
+        return FolderFinalizeResult(
+            batch_id=batch_id,
+            customer_path=(
+                customer_path
+                if customer_path is not None
+                else (batch.get("customer_path") if batch else None)
+            ),
+            uploaded_count=uploaded_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            status=CustomerUploadBatchStatus.ABANDONED,
+            error_message=BATCH_ABANDONED,
+            uploaded_paths=uploaded_paths or [],
         )
 
 

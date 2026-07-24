@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date
+import logging
 from urllib.parse import quote
 
 import aiohttp
@@ -12,6 +14,12 @@ INTAKE_FOLDER = "01_Входящие_Telegram"
 CUSTOMERS_FOLDER = "02_Клиенты"
 CUSTOMERS_INTAKE_SUBFOLDER = "01_Входящие"
 CASES_FOLDER = "03_Сделки"
+
+_RETRYABLE_HTTP_STATUSES = frozenset({423, 429, 500, 502, 503, 504})
+_RETRY_DELAYS_SECONDS = (1, 2, 4, 8)
+_MAX_RETRY_ATTEMPTS = 4
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -43,8 +51,7 @@ class YandexDiskClient:
                 disk_path,
                 overwrite=overwrite,
             )
-            async with session.put(upload_url, data=content) as response:
-                response.raise_for_status()
+            await self._put_upload_content(session, upload_url, content)
 
         return disk_path
 
@@ -67,14 +74,7 @@ class YandexDiskClient:
         async with aiohttp.ClientSession(headers=self._headers) as session:
             if parent and parent != "/":
                 await self._create_directories(session, parent)
-            url = f"{YANDEX_DISK_API_URL}?path={quote(disk_path, safe='')}"
-            async with session.put(url) as response:
-                if response.status == 201:
-                    return True
-                if response.status == 409:
-                    return False
-                response.raise_for_status()
-        return False
+            return await self._put_directory(session, disk_path)
 
     async def ensure_directory(self, path: str) -> None:
         async with aiohttp.ClientSession(headers=self._headers) as session:
@@ -129,11 +129,31 @@ class YandexDiskClient:
         session: aiohttp.ClientSession,
         path: str,
     ) -> None:
+        await self._put_directory(session, path)
+
+    async def _put_directory(
+        self,
+        session: aiohttp.ClientSession,
+        path: str,
+    ) -> bool:
         url = f"{YANDEX_DISK_API_URL}?path={quote(self._normalize_path(path), safe='')}"
-        async with session.put(url) as response:
-            if response.status in (201, 409):
-                return
-            response.raise_for_status()
+
+        async def attempt() -> bool:
+            async with session.put(url) as response:
+                if response.status == 201:
+                    return True
+                if response.status == 409:
+                    return False
+                if response.status in _RETRYABLE_HTTP_STATUSES:
+                    body = await response.text()
+                    raise _RetryableYandexDiskError(
+                        response.status,
+                        f"create_directory status={response.status}: {body[:200]}",
+                    )
+                response.raise_for_status()
+            return False
+
+        return await _run_with_retries("create_directory", attempt)
 
     async def _get_upload_url(
         self,
@@ -147,10 +167,38 @@ class YandexDiskClient:
             f"?path={quote(path, safe='')}"
             f"&overwrite={str(overwrite).lower()}"
         )
-        async with session.get(url) as response:
-            response.raise_for_status()
-            payload = await response.json()
-            return payload["href"]
+
+        async def attempt() -> str:
+            async with session.get(url) as response:
+                if response.status in _RETRYABLE_HTTP_STATUSES:
+                    body = await response.text()
+                    raise _RetryableYandexDiskError(
+                        response.status,
+                        f"get_upload_url status={response.status}: {body[:200]}",
+                    )
+                response.raise_for_status()
+                payload = await response.json()
+                return payload["href"]
+
+        return await _run_with_retries("get_upload_url", attempt)
+
+    async def _put_upload_content(
+        self,
+        session: aiohttp.ClientSession,
+        upload_url: str,
+        content: bytes,
+    ) -> None:
+        async def attempt() -> None:
+            async with session.put(upload_url, data=content) as response:
+                if response.status in _RETRYABLE_HTTP_STATUSES:
+                    body = await response.text()
+                    raise _RetryableYandexDiskError(
+                        response.status,
+                        f"upload_content status={response.status}: {body[:200]}",
+                    )
+                response.raise_for_status()
+
+        await _run_with_retries("upload_content", attempt)
 
     def build_intake_file_path(
         self,
@@ -188,3 +236,62 @@ class YandexDiskClient:
     def _normalize_path(path: str) -> str:
         return "/" + path.strip("/")
 
+
+class _RetryableYandexDiskError(RuntimeError):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+async def _run_with_retries(operation: str, attempt_factory):
+    last_error: Exception | None = None
+    for attempt in range(_MAX_RETRY_ATTEMPTS):
+        try:
+            return await attempt_factory()
+        except _RetryableYandexDiskError as exc:
+            last_error = exc
+            if attempt >= _MAX_RETRY_ATTEMPTS - 1:
+                logger.error(
+                    "Yandex Disk %s retries exhausted status=%s attempts=%s: %s",
+                    operation,
+                    exc.status,
+                    _MAX_RETRY_ATTEMPTS,
+                    exc,
+                )
+                raise
+            delay = _RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Yandex Disk %s temporary status=%s attempt=%s/%s delay=%ss",
+                operation,
+                exc.status,
+                attempt + 1,
+                _MAX_RETRY_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+        except aiohttp.ClientResponseError as exc:
+            if exc.status not in _RETRYABLE_HTTP_STATUSES:
+                raise
+            last_error = exc
+            if attempt >= _MAX_RETRY_ATTEMPTS - 1:
+                logger.error(
+                    "Yandex Disk %s retries exhausted status=%s attempts=%s",
+                    operation,
+                    exc.status,
+                    _MAX_RETRY_ATTEMPTS,
+                )
+                raise
+            delay = _RETRY_DELAYS_SECONDS[attempt]
+            logger.warning(
+                "Yandex Disk %s temporary status=%s attempt=%s/%s delay=%ss",
+                operation,
+                exc.status,
+                attempt + 1,
+                _MAX_RETRY_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"Yandex Disk {operation} retries exhausted")

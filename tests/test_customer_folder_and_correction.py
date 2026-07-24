@@ -366,8 +366,9 @@ class CustomerFolderServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.disk.upload_bytes = AsyncMock(side_effect=upload)
         result = await self.service.ensure_batch_files_saved(batch["id"])
         self.assertEqual(result.failed_count, 1)
-        self.assertEqual(result.status, CustomerUploadBatchStatus.UPLOADING)
+        self.assertEqual(result.status, CustomerUploadBatchStatus.RECOGNIZED)
         refreshed = await self.repo.get_batch_by_id(batch["id"])
+        self.assertEqual(refreshed["status"], CustomerUploadBatchStatus.RECOGNIZED)
         self.assertIsNotNone(refreshed["customer_path"])
         files = await self.repo.get_batch_files(batch["id"])
         by_content = {

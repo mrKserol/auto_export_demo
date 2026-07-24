@@ -36,7 +36,11 @@ from app.services.customer_file_download_service import (
     CustomerFileDownloadError,
     download_customer_file_from_telegram,
 )
-from app.services.customer_folder_service import CustomerFolderService
+from app.services.customer_folder_service import (
+    ALREADY_SAVING_OR_SAVED,
+    BATCH_ABANDONED,
+    CustomerFolderService,
+)
 from app.services.miniapp_link_service import (
     build_customer_edit_miniapp_url,
     create_customer_batch_token,
@@ -187,6 +191,18 @@ async def handle_batch_process(
         await callback.answer()
         return
 
+    if status in {
+        CustomerUploadBatchStatus.CREATING_FOLDER,
+        CustomerUploadBatchStatus.UPLOADING,
+        CustomerUploadBatchStatus.FILES_SAVED,
+        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
+    }:
+        await callback.message.answer(
+            "Документы уже сохраняются или сохранены."
+        )
+        await callback.answer()
+        return
+
     file_count = await customer_upload_batch_repository.count_batch_files(batch["id"])
     if (
         status == CustomerUploadBatchStatus.COLLECTING
@@ -261,8 +277,21 @@ async def handle_batch_process(
         await callback.message.answer(
             "Документы распознаны, но не удалось сохранить файлы на Яндекс Диск.\n"
             "Попробуйте повторить обработку.",
-            reply_markup=_post_recognition_keyboard(include_edit=True),
+            reply_markup=_post_recognition_keyboard(include_edit=False),
         )
+        return
+
+    if finalize.error_message == ALREADY_SAVING_OR_SAVED:
+        await callback.message.answer(
+            "Документы уже сохраняются или сохранены."
+        )
+        return
+
+    if (
+        finalize.status == CustomerUploadBatchStatus.ABANDONED
+        or finalize.error_message == BATCH_ABANDONED
+    ):
+        await callback.message.answer("Загрузка клиента отменена.")
         return
 
     files = await customer_upload_batch_repository.get_batch_files(batch["id"])
@@ -288,9 +317,10 @@ async def handle_batch_process(
             "Папка сохранена, повторите обработку для дозагрузки."
         )
 
+    include_edit = finalize.status == CustomerUploadBatchStatus.FILES_SAVED
     await callback.message.answer(
         preview,
-        reply_markup=_post_recognition_keyboard(include_edit=True),
+        reply_markup=_post_recognition_keyboard(include_edit=include_edit),
     )
 
 
@@ -318,11 +348,23 @@ async def handle_batch_edit(
         await callback.answer()
         return
 
-    if batch["status"] in {
-        CustomerUploadBatchStatus.ABANDONED,
-        CustomerUploadBatchStatus.CUSTOMER_SAVED,
+    if batch["status"] == CustomerUploadBatchStatus.ABANDONED:
+        await callback.message.answer("Загрузка клиента отменена.")
+        await callback.answer()
+        return
+
+    if batch["status"] == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+        await callback.message.answer("Клиент уже сохранён.")
+        await callback.answer()
+        return
+
+    if batch["status"] not in {
+        CustomerUploadBatchStatus.FILES_SAVED,
+        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
     }:
-        await callback.message.answer("Этот пакет уже недоступен для редактирования.")
+        await callback.message.answer(
+            "Форма ручной коррекции доступна после сохранения документов."
+        )
         await callback.answer()
         return
 
@@ -333,10 +375,7 @@ async def handle_batch_edit(
         origin_chat_id=callback.message.chat.id,
     )
     url = build_customer_edit_miniapp_url(settings, token)
-    if batch["status"] not in {
-        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
-        CustomerUploadBatchStatus.CUSTOMER_SAVED,
-    }:
+    if batch["status"] != CustomerUploadBatchStatus.AWAITING_CONFIRMATION:
         await customer_upload_batch_repository.mark_batch_awaiting_confirmation(
             int(batch["id"])
         )
@@ -372,9 +411,20 @@ async def handle_batch_cancel(
         state=state,
         repository=customer_upload_batch_repository,
     )
-    if batch is not None and batch["status"] not in {
-        CustomerUploadBatchStatus.CUSTOMER_SAVED,
-        CustomerUploadBatchStatus.ABANDONED,
+    if batch is None:
+        await state.clear()
+        await callback.message.answer(
+            "Активный пакет документов не найден.\n"
+            "Начните заново командой /add_customer"
+        )
+        await callback.answer()
+        return
+
+    status = batch["status"]
+    if status in {
+        CustomerUploadBatchStatus.COLLECTING,
+        CustomerUploadBatchStatus.RECOGNIZED,
+        CustomerUploadBatchStatus.FAILED,
     }:
         await customer_upload_batch_repository.update_batch_status(
             batch["id"],
@@ -388,12 +438,46 @@ async def handle_batch_cancel(
             batch.get("telegram_user_id"),
             batch.get("media_group_id"),
         )
+        await state.clear()
+        await callback.message.answer(
+            "Загрузка клиента отменена.\n\n"
+            "Полученные документы сохранены в системе и не потеряны."
+        )
+        await callback.answer()
+        return
 
-    await state.clear()
-    await callback.message.answer(
-        "Загрузка клиента отменена.\n\n"
-        "Полученные документы сохранены в системе и не потеряны."
-    )
+    if status in {
+        CustomerUploadBatchStatus.RECOGNIZING,
+        CustomerUploadBatchStatus.CREATING_FOLDER,
+        CustomerUploadBatchStatus.UPLOADING,
+    }:
+        await callback.message.answer(
+            "Сейчас документы обрабатываются. Дождитесь завершения операции."
+        )
+        await callback.answer()
+        return
+
+    if status in {
+        CustomerUploadBatchStatus.FILES_SAVED,
+        CustomerUploadBatchStatus.AWAITING_CONFIRMATION,
+    }:
+        await callback.message.answer(
+            "Документы уже сохранены. Можно открыть ручную коррекцию данных."
+        )
+        await callback.answer()
+        return
+
+    if status == CustomerUploadBatchStatus.CUSTOMER_SAVED:
+        await callback.message.answer("Клиент уже сохранён.")
+        await callback.answer()
+        return
+
+    if status == CustomerUploadBatchStatus.ABANDONED:
+        await state.clear()
+        await callback.message.answer("Загрузка клиента отменена.")
+        await callback.answer()
+        return
+
     await callback.answer()
 
 

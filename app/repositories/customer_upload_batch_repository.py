@@ -546,6 +546,28 @@ class CustomerUploadBatchRepository:
             )
             return _record_to_dict(row)
 
+    async def claim_batch_for_file_saving(self, batch_id: int) -> bool:
+        """Atomically move batch from recognized to creating_folder.
+
+        Returns True only for the single winner of the race.
+        """
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE customer_upload_batches
+                SET
+                    status = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                  AND status = $3
+                RETURNING id;
+                """,
+                batch_id,
+                CustomerUploadBatchStatus.CREATING_FOLDER,
+                CustomerUploadBatchStatus.RECOGNIZED,
+            )
+            return row is not None
+
     async def set_batch_customer_path(
         self,
         batch_id: int,

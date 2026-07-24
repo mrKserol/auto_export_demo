@@ -72,6 +72,14 @@ def _resolve_web_port() -> int:
     return 8000
 
 
+def resolve_app_commit_sha() -> str:
+    for name in ("RAILWAY_GIT_COMMIT_SHA", "GIT_COMMIT_SHA"):
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return "unknown"
+
+
 def load_settings() -> Settings:
     enable_processing = _parse_bool_env("ENABLE_PROCESSING", default=False)
     yandex_function_url = os.getenv("YANDEX_FUNCTION_URL")
@@ -109,5 +117,5 @@ def load_settings() -> Settings:
             "CUSTOMER_UPLOAD_MAX_FILE_BYTES",
             20 * 1024 * 1024,
         ),
-        app_commit_sha=os.getenv("APP_COMMIT_SHA", "e32df4b653191f547cd3d7055652912ed8a5924f"),
+        app_commit_sha=resolve_app_commit_sha(),
     )
