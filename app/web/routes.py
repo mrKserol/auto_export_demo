@@ -287,6 +287,7 @@ async def update_specification_api(
     payload: dict[str, Any],
     settings: Settings = Depends(get_settings),
     database: Database = Depends(get_database),
+    bot: Bot = Depends(get_bot),
 ) -> JSONResponse:
     try:
         form = SpecificationEditFormIn.model_validate(payload)
@@ -366,7 +367,7 @@ async def update_specification_api(
     except Exception:
         logger.exception("Failed to notify user after spec update")
 
-    # fetch updated data to return to miniapp for user feedback
+    # fetch updated data to return to miniapp for user feedback and notify via bot
     try:
         updated_customer = await database.get_customer_by_id(int(context.customer_id))
         updated_spec = await database.get_specification_by_id(int(specification_id))
@@ -382,6 +383,27 @@ async def update_specification_api(
     extra_msg = ""
     if estimate_reset:
         extra_msg = "⚠️ Предыдущая смета удалена, так как данные автомобиля изменились. Создайте новую смету."
+
+    # notify user in Telegram about the update
+    try:
+        telegram_chat_id = int(telegram_user.id)
+        notify_lines = []
+        notify_lines.append("✅ Спецификация обновлена")
+        if extra_msg:
+            notify_lines.append(extra_msg)
+        if specification_text:
+            notify_lines.append("")
+            notify_lines.append(specification_text)
+        await bot.send_message(chat_id=telegram_chat_id, text="\n".join(notify_lines))
+        # send updated customer card with keyboard
+        has_est = await customer_has_estimate(updated_customer, database)
+        await bot.send_message(
+            chat_id=telegram_chat_id,
+            text=customer_card or "",
+            reply_markup=build_customer_card_keyboard(updated_customer, is_admin=False, has_estimate=has_est),
+        )
+    except Exception:
+        logger.exception("Failed to send Telegram notification after spec update")
 
     return JSONResponse(
         status_code=200,
