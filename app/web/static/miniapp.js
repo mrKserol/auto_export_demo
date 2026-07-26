@@ -173,6 +173,7 @@
       '<button class="back-link" data-nav="/miniapp">← Назад</button>' +
       '<div class="header"><h1>Создание клиента</h1>' +
       '<p class="subtitle">Загрузите документы клиента</p></div>' +
+      '<p class="hint">Можно загружать фото в любой ориентации — приложение попробует повернуть документ автоматически. Убедитесь, что весь документ попал в кадр и текст не размыт.</p>' +
       '<div class="stack">' + slotsHtml + "</div>" +
       '<p class="hint" style="margin-top:14px">Если загрузка из приложения не работает, документы можно отправить боту командой /add_customer.</p>' +
       '<div class="stack" style="margin-top:16px">' +

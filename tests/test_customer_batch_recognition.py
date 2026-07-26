@@ -181,7 +181,9 @@ class KitValidationUnitTests(unittest.TestCase):
 class RecognizeDocumentUnitTests(unittest.IsolatedAsyncioTestCase):
     async def test_ocr_called_once_per_document(self) -> None:
         ocr = AsyncMock()
-        ocr.recognize_text = AsyncMock(return_value="PASSPORT OCR TEXT")
+        ocr.recognize_text_auto_oriented = AsyncMock(
+            return_value="PASSPORT OCR TEXT LONG ENOUGH FOR GUARD"
+        )
         gpt = AsyncMock()
         gpt.complete = AsyncMock(
             side_effect=[
@@ -190,9 +192,18 @@ class RecognizeDocumentUnitTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         service = CustomerDocumentRecognitionService(ocr_service=ocr, gpt_service=gpt)
-        result = await service.recognize_document(b"img", "image/jpeg", "a.jpg")
+        result = await service.recognize_document(
+            b"img",
+            "image/jpeg",
+            "a.jpg",
+            declared_document_type="passport_main",
+        )
         self.assertEqual(result.document_type, "passport_main")
-        self.assertEqual(ocr.recognize_text.await_count, 1)
+        self.assertEqual(ocr.recognize_text_auto_oriented.await_count, 1)
+        self.assertEqual(
+            ocr.recognize_text_auto_oriented.await_args.kwargs["score_profile"],
+            "passport_main",
+        )
         self.assertEqual(result.extracted_fields.get("last_name"), "Ivanov")
 
 
@@ -277,7 +288,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
         batch = await self._create_batch_with_files()
         call_order: list[bytes] = []
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             call_order.append(content)
             mapping = {
                 b"a": ("passport_main", {"last_name": "Ivanov", "first_name": "Ivan", "passport": "80 06 035956"}),
@@ -319,7 +330,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             mapping = {
                 b"b": ("passport_registration", {}),
                 b"c": ("snils", {"last_name": "Ivanov", "first_name": "Ivan"}),
@@ -354,7 +365,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             mapping = {
                 b"a": ("passport_main", {"last_name": "Ivanov", "first_name": "Ivan", "passport": "1"}),
                 b"b": ("passport_registration", {}),
@@ -380,7 +391,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
             status=CustomerUploadBatchStatus.RECOGNIZING
         )
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             mapping = {
                 b"a": ("passport_main", {"last_name": "Ivanov", "first_name": "Ivan", "passport": "1"}),
                 b"b": ("passport_registration", {}),
@@ -414,7 +425,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_file_error_keeps_other_results(self) -> None:
         batch = await self._create_batch_with_files()
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             if content == b"c":
                 raise RuntimeError("ocr down")
             mapping = {
@@ -450,7 +461,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_all_ocr_failures_mark_batch_failed(self) -> None:
         batch = await self._create_batch_with_files()
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             raise RuntimeError("Yandex OCR error 429")
 
         self.recognition.recognize_document = AsyncMock(side_effect=recognize)
@@ -462,7 +473,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_incomplete_kit_message(self) -> None:
         batch = await self._create_batch_with_files()
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             mapping = {
                 b"a": ("passport_main", {"last_name": "Ivanov", "first_name": "Ivan", "passport": "1"}),
                 b"b": ("passport_registration", {}),
@@ -487,7 +498,7 @@ class CustomerBatchRecognitionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_callback_runs_recognition_and_reports_success(self) -> None:
         batch = await self._create_batch_with_files()
 
-        async def recognize(content, mime_type, filename):
+        async def recognize(content, mime_type, filename, *, declared_document_type=None):
             mapping = {
                 b"a": ("passport_main", {"last_name": "Ivanov", "first_name": "Ivan", "passport": "1"}),
                 b"b": ("passport_registration", {}),

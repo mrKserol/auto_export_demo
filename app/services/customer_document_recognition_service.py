@@ -20,7 +20,10 @@ from app.services.validation_service import (
     normalize_tin,
 )
 from app.services.yandex_gpt_service import YandexGPTService, parse_json_response
-from app.services.yandex_ocr_service import YandexOCRService
+from app.services.yandex_ocr_service import (
+    YandexOCRService,
+    score_profile_for_declared_document_type,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -265,13 +268,24 @@ class CustomerDocumentRecognitionService:
         content: bytes,
         mime_type: str | None,
         filename: str | None,
+        *,
+        declared_document_type: str | None = None,
+        score_profile: str | None = None,
     ) -> CustomerDocumentRecognitionResult:
-        """Run OCR once, classify document type, then extract fields."""
-        ocr_text = await self._run_ocr(
+        """Run OCR (auto-oriented), classify document type, then extract fields.
+
+        declared_document_type only selects the OCR score profile; the document
+        type guard still decides detected_document_type.
+        """
+        profile = score_profile or score_profile_for_declared_document_type(
+            declared_document_type
+        )
+        ocr_text = await self._run_ocr_with_rotation(
             "batch_document",
             content,
             mime_type,
             filename=filename,
+            score_profile=profile,
         )
         if not (ocr_text or "").strip():
             return CustomerDocumentRecognitionResult(
@@ -292,6 +306,15 @@ class CustomerDocumentRecognitionService:
         reason = guard.get("reason")
         if reason:
             warnings.append(str(reason))
+        if (
+            declared_document_type
+            and document_type not in {"unknown", "mixed"}
+            and declared_document_type != document_type
+        ):
+            warnings.append(
+                f"declared_document_type={declared_document_type} "
+                f"detected_document_type={document_type}"
+            )
 
         if document_type in {"mixed", "unknown"}:
             return CustomerDocumentRecognitionResult(
@@ -350,11 +373,12 @@ class CustomerDocumentRecognitionService:
         *,
         filename: str | None = None,
     ) -> dict:
-        ocr_text = await self._run_ocr(
+        ocr_text = await self._run_ocr_with_rotation(
             "passport_main",
             file_content,
             mime_type,
             filename=filename,
+            score_profile="passport_main",
         )
         guard = await self._detect_document_type_from_ocr(ocr_text)
         if not _is_document_type_allowed(guard, "passport_main"):
@@ -393,7 +417,13 @@ class CustomerDocumentRecognitionService:
         *,
         filename: str | None = None,
     ) -> dict:
-        ocr_text = await self._run_ocr("snils", file_content, mime_type, filename=filename)
+        ocr_text = await self._run_ocr_with_rotation(
+            "snils",
+            file_content,
+            mime_type,
+            filename=filename,
+            score_profile="snils",
+        )
         guard = await self._detect_document_type_from_ocr(ocr_text)
         if not _is_document_type_allowed(guard, "snils"):
             return _build_document_type_mismatch("snils", guard)
@@ -428,22 +458,19 @@ class CustomerDocumentRecognitionService:
         filename: str | None = None,
         ocr_text: str | None = None,
         use_registration_rotation: bool = False,
+        score_profile: str | None = None,
     ) -> dict:
         if ocr_text is None:
-            if use_registration_rotation:
-                ocr_text = await self._run_ocr_with_rotation(
-                    "document_type_guard",
-                    file_content,
-                    mime_type,
-                    filename=filename,
-                )
-            else:
-                ocr_text = await self._run_ocr(
-                    "document_type_guard",
-                    file_content,
-                    mime_type,
-                    filename=filename,
-                )
+            profile = score_profile or (
+                "registration" if use_registration_rotation else "generic"
+            )
+            ocr_text = await self._run_ocr_with_rotation(
+                "document_type_guard",
+                file_content,
+                mime_type,
+                filename=filename,
+                score_profile=profile,
+            )
         return await self._detect_document_type_from_ocr(ocr_text)
 
     async def _detect_document_type_from_ocr(self, ocr_text: str) -> dict:
@@ -483,12 +510,20 @@ class CustomerDocumentRecognitionService:
         score_profile: str = "registration",
     ) -> str:
         try:
-            ocr_text = await self.ocr_service.recognize_text_with_rotation_candidates(
-                file_content,
-                mime_type,
-                filename=filename,
-                score_profile=score_profile,
-            )
+            if hasattr(self.ocr_service, "recognize_text_auto_oriented"):
+                ocr_text = await self.ocr_service.recognize_text_auto_oriented(
+                    file_content,
+                    mime_type,
+                    filename=filename,
+                    score_profile=score_profile,
+                )
+            else:
+                ocr_text = await self.ocr_service.recognize_text_with_rotation_candidates(
+                    file_content,
+                    mime_type,
+                    filename=filename,
+                    score_profile=score_profile,
+                )
         except AttributeError:
             ocr_text = await self._run_ocr(
                 document_type,

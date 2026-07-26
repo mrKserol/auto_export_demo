@@ -307,6 +307,7 @@ class CustomerBatchRecognitionService:
                 content=bytes(content),
                 mime_type=file_row.get("mime_type"),
                 filename=file_row.get("original_filename"),
+                declared_document_type=file_row.get("declared_document_type"),
             )
         except Exception as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
