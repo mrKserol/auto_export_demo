@@ -1,5 +1,7 @@
 # Auto Export Demo
 
+**License:** All Rights Reserved © 2026 Almaz Sadykov · [LICENSE](LICENSE)
+
 [Русская версия → README.md](README.md)
 
 Telegram bot and Telegram Mini App for auto-export customer onboarding: document kit upload, OCR, field extraction, Yandex Disk storage, customer creation, specifications, and estimates.
@@ -340,7 +342,6 @@ Coverage includes initData, tokens, batch upload/recognition, Mini App ACL, stal
 - OCR `min_delay_seconds` is configured on the service; an explicit pause between successful requests is not currently enforced (retry backoff and a global OCR lock exist).
 - Calcus works only when `CALCUS_*` is configured.
 - HEIC requires `pillow-heif`.
-- No LICENSE file is published in the repository.
 
 ---
 
@@ -356,4 +357,10 @@ Do not treat as production-ready without a populated allowlist, stuck-batch moni
 
 ## 17. License
 
-No license file is published in the repository. Use is governed by the repository owner unless stated otherwise.
+This project is distributed under an **All Rights Reserved** proprietary license.
+
+Copyright (c) 2026 Almaz Sadykov. All rights reserved.
+
+No part of this project may be copied, modified, distributed, published, reused or incorporated into another project without prior written permission from the copyright holder.
+
+See the [LICENSE](LICENSE) file for details.
