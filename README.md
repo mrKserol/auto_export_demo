@@ -1,73 +1,252 @@
 # Auto Export Demo
 
-MVP Telegram bot for an auto export document workflow.
+[English version → README.en.md](README.en.md)
 
-Architecture:
+Telegram-бот и Telegram Mini App для онбординга клиентов автоэкспорта: загрузка комплекта документов, OCR, извлечение полей, сохранение на Яндекс Диск, создание клиента, спецификации и сметы.
 
-```text
-Telegram group/private chat -> Railway bot -> Yandex Disk -> PostgreSQL
+Репозиторий: [github.com/mrKserol/auto_export_demo](https://github.com/mrKserol/auto_export_demo)
+
+---
+
+## 1. О проекте
+
+Система принимает комплект из четырёх документов клиента (главная страница паспорта, страница регистрации, СНИЛС, ИНН), распознаёт текст через Yandex OCR, классифицирует тип документа и извлекает поля через YandexGPT, сохраняет файлы на Яндекс Диск и позволяет сотруднику проверить и сохранить карточку клиента.
+
+Работа доступна двумя путями:
+
+- команды и кнопки в Telegram (чат / группа);
+- Arthur AutoExport Mini App (веб-интерфейс внутри Telegram).
+
+Процесс `python -m app.main` одновременно запускает aiogram polling и FastAPI (uvicorn).
+
+---
+
+## 2. Возможности
+
+- Добавление клиента по комплекту документов (`/add_customer` и Mini App).
+- Поиск клиента по паспорту и редактирование карточки.
+- Автоориентация изображений перед OCR: EXIF Orientation + адаптивный перебор углов 0° / 90° / 180° / 270°.
+- Определение типа документа и извлечение полей (паспорт, прописка, СНИЛС, ИНН).
+- Загрузка исходных файлов на Яндекс Диск в папку клиента.
+- Создание и редактирование спецификации автомобиля (Mini App + FSM).
+- Создание сметы (Mini App / загрузка / пошаговый ввод), Excel-шаблон, опциональный расчёт таможни через Calcus.
+- Генерация договора клиента из DOCX-шаблона.
+- Allowlist сотрудников для Mini App API.
+- Фоновая обработка batch и восстановление «зависших» Mini App batch после рестарта.
+- Health-check FastAPI: `GET /health`.
+
+---
+
+## 3. Архитектура
+
+```mermaid
+flowchart LR
+  subgraph clients [Клиенты]
+    TG[Telegram Chat / Group]
+    MA[Telegram Mini App]
+  end
+
+  subgraph railway [Railway]
+    BOT[aiogram Bot]
+    API[FastAPI + uvicorn]
+    BG[In-process background tasks]
+  end
+
+  subgraph data [Данные и внешние сервисы]
+    PG[(PostgreSQL)]
+    YD[Yandex Disk]
+    OCR[Yandex OCR]
+    GPT[YandexGPT]
+    CAL[Calcus Customs API]
+  end
+
+  TG --> BOT
+  MA --> API
+  BOT --> API
+  BOT --> PG
+  API --> PG
+  BOT --> YD
+  API --> YD
+  BG --> OCR
+  BG --> GPT
+  BOT --> OCR
+  BOT --> GPT
+  API --> BG
+  BOT --> CAL
 ```
 
-Optional processing:
+Поток документов клиента (упрощённо):
 
 ```text
-Railway bot -> Yandex Cloud Function -> PostgreSQL -> Telegram reply
+Загрузка 4 файлов
+  → OCR (+ автоориентация для изображений)
+  → классификация типа
+  → извлечение полей (YandexGPT)
+  → проверка комплекта
+  → папка на Яндекс Диске
+  → ручная проверка / сохранение клиента
 ```
 
-The Railway bot listens for documents, downloads the original file from
-Telegram, uploads the bytes to Yandex Disk, stores metadata in PostgreSQL, and
-replies to Telegram.
+---
 
-OCR and LLM processing are intentionally not implemented yet.
+## 4. Сценарий работы
 
-## Stack
+### Telegram: `/add_customer`
 
-- Python 3.11+
-- aiogram 3
-- FastAPI + uvicorn
-- PostgreSQL
-- Yandex Disk REST API
-- Optional Yandex Cloud Function
-- Railway
-- Telegram Mini App (HTML/CSS/JS)
-## Supported Files
+1. Сотрудник отправляет `/add_customer`.
+2. Загружает до четырёх файлов (фото или документ).
+3. Нажимает распознавание.
+4. Бот выполняет OCR/классификацию/извлечение, сохраняет файлы на Диск.
+5. Открывается форма проверки / карточка клиента в Mini App (в ЛС; из группы — deep link).
 
-`pdf`, `jpg`, `jpeg`, `png`, `webp`, `heic`, `docx`, `xlsx`
+### Mini App: создание клиента
 
-## Environment Variables
+1. Открыть `/miniapp` (доступ только для Telegram user id из allowlist).
+2. «Добавить клиента» → загрузить 4 слота документов.
+3. «Распознать» → polling статуса → превью → форма сохранения.
+4. Далее можно открыть карточку и создать спецификацию.
 
-Create a local `.env` file from `.env.example` or configure these variables in
-Railway:
+### Mini App: поиск клиента
+
+1. «Найти клиента» → ввод паспорта (10 цифр).
+2. Карточка → редактирование или создание спецификации (если ещё нет).
+
+### Спецификация и смета
+
+- Спецификация: Mini App-форма или `/add_specification` (FSM).
+- Смета: из карточки / спецификации — Mini App, загрузка файла или пошаговый ввод; опционально Calcus.
+
+---
+
+## 5. Поддерживаемые документы
+
+Комплект для онбординга клиента:
+
+| Тип | Назначение |
+|---|---|
+| `passport_main` | Главная страница / разворот паспорта РФ |
+| `passport_registration` | Страница регистрации |
+| `snils` | СНИЛС |
+| `tin` | ИНН физлица |
+
+`declared_document_type` в Mini App задаёт слот и OCR score-профиль, но **не** подменяет итоговую классификацию: guard по OCR-тексту определяет `detected_document_type`. При несовпадении результат сохраняется с предупреждением.
+
+---
+
+## 6. Поддерживаемые форматы файлов
+
+Для загрузки документов клиента (Telegram batch / Mini App):
+
+- `jpg`, `jpeg`, `png`, `webp`, `heic` / `heif`, `pdf`
+
+Дополнительно в общем document pipeline (не клиентский batch):
+
+- `docx`, `xlsx` (см. `SUPPORTED_EXTENSIONS` в `file_service`)
+
+Шаблоны:
+
+- `templates/customer_contract_template.docx`
+- `templates/smeta_template.xlsx`
+
+Лимит размера файла клиента (по умолчанию): 20 МБ (`CUSTOMER_UPLOAD_MAX_FILE_BYTES`).
+
+---
+
+## 7. Стек технологий
+
+| Компонент | Технология |
+|---|---|
+| Язык | Python 3.11+ |
+| Telegram | aiogram 3 |
+| HTTP API / Mini App | FastAPI, uvicorn, pydantic |
+| БД | PostgreSQL, asyncpg |
+| Хранение файлов | Yandex Disk REST API |
+| OCR | Yandex OCR API |
+| LLM | YandexGPT |
+| PDF | PyMuPDF |
+| Изображения | Pillow (+ опционально pillow-heif для HEIC) |
+| Документы | docxtpl, openpyxl |
+| Deploy | Railway (`railpack.json`, start: `python -m app.main`) |
+
+---
+
+## 8. Структура проекта
+
+```text
+app/
+  main.py                 # точка входа
+  bot.py                  # polling + uvicorn + startup recovery
+  config.py               # настройки из env
+  database.py             # схема PostgreSQL (CREATE / ENSURE)
+  handlers/               # команды и callback Telegram
+  repositories/           # batch-репозиторий
+  services/               # OCR, GPT, Disk, Mini App, сметы, …
+  web/                    # FastAPI, auth, static Mini App
+  states/                 # FSM
+templates/                # DOCX / XLSX шаблоны
+tests/                    # unittest
+railpack.json             # Railway start command
+requirements.txt
+.env.example
+```
+
+---
+
+## 9. Переменные окружения
+
+Источник истины: `app/config.py` и `.env.example`. Секреты в git не коммитить.
+
+### Обязательные
+
+| Переменная | Назначение |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | токен бота |
+| `DATABASE_URL` | PostgreSQL |
+| `YANDEX_DISK_TOKEN` | OAuth-токен Диска |
+| `YANDEX_API_KEY` | ключ для OCR / GPT |
+| `YANDEX_CLOUD_FOLDER_ID` | folder id облака для GPT |
+| `MINI_APP_BASE_URL` | публичный HTTPS URL приложения |
+| `MINI_APP_TOKEN_SECRET` | секрет подписи launch-токенов (**не** равен bot token) |
+
+### Опциональные / со значениями по умолчанию
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `YANDEX_DISK_BASE_PATH` | `/auto_export_demo` | корневая папка на Диске |
+| `YANDEX_FUNCTION_URL` | пусто | Cloud Function (если `ENABLE_PROCESSING=true` — обязателен) |
+| `ENABLE_PROCESSING` | `false` | legacy-пайплайн через Function |
+| `OCR_MIN_DELAY_SECONDS` | `1.5` | параметр OCR-сервиса |
+| `MAX_OCR_RETRIES` | `5` | ретраи OCR при 429/5xx |
+| `WEB_HOST` | `0.0.0.0` | bind FastAPI |
+| `WEB_PORT` / `PORT` | `8000` | порт (`PORT` имеет приоритет) |
+| `MINI_APP_TOKEN_TTL_SECONDS` | `900` | TTL launch-токена |
+| `TELEGRAM_INIT_DATA_MAX_AGE_SECONDS` | `900` | TTL Telegram `initData` |
+| `CUSTOMER_UPLOAD_MAX_FILE_BYTES` | `20971520` | лимит файла клиента |
+| `CUSTOMER_BATCH_STALE_PROCESSING_SECONDS` | `600` | порог «зависшего» recognizing |
+| `TELEGRAM_BOT_USERNAME` | пусто | username бота без `@` |
+| `MINIAPP_TEST_MODE` | `false` | **не** открывает Mini App всем; allowlist не обходится |
+| `MINIAPP_ALLOWED_TELEGRAM_USER_IDS` | пусто | CSV Telegram user id; **пустой = все Mini App API 403** |
+| `CALCUS_CLIENT_ID` / `CALCUS_API_KEY` | пусто | таможня в сметах |
+| `CALCUS_CUSTOMS_API_URL` | `https://calcus.ru/api/v1/Customs` | URL Calcus |
+| `RAILWAY_GIT_COMMIT_SHA` / `GIT_COMMIT_SHA` | `unknown` | диагностический SHA |
+
+Пример allowlist:
 
 ```bash
-TELEGRAM_BOT_TOKEN=replace_me
-DATABASE_URL=postgresql://user:password@host:5432/database
-YANDEX_DISK_TOKEN=replace_me
-YANDEX_DISK_BASE_PATH=/auto_export_demo
-YANDEX_FUNCTION_URL=
-ENABLE_PROCESSING=false
-MINI_APP_BASE_URL=https://autoexportdemo-production.up.railway.app
-MINI_APP_TOKEN_SECRET=replace-with-random-secret
-WEB_HOST=0.0.0.0
-WEB_PORT=8000
-MINI_APP_TOKEN_TTL_SECONDS=900
-TELEGRAM_INIT_DATA_MAX_AGE_SECONDS=900
+MINIAPP_ALLOWED_TELEGRAM_USER_IDS=316257868,123456789
 ```
 
-Do not commit real secrets.
+---
 
-Port selection priority:
-
-- On Railway the platform provides `PORT` (preferred).
-- Locally you can set `WEB_PORT`.
-- Resolution: PORT → WEB_PORT → 8000.
-
-## Local Run
+## 10. Локальный запуск
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+cp .env.example .env
+# заполнить секреты и MINIAPP_ALLOWED_TELEGRAM_USER_IDS
 
 set -a
 source .env
@@ -76,87 +255,105 @@ set +a
 python -m app.main
 ```
 
-The process starts aiogram polling and the FastAPI Mini App server together.
-
-Health check:
+Проверка:
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-## Telegram Mini App
+Таблицы создаются/дополняются при подключении к БД (`CREATE TABLE IF NOT EXISTS` + `ENSURE … COLUMN`).
 
-The specification Mini App lets users fill all vehicle fields on one screen
-inside Telegram.
+Для HEIC желателен пакет `pillow-heif` (если не установлен — HEIC OCR вернёт ошибку поддержки).
 
-Endpoints:
+---
 
-- `GET /health` — liveness probe
-- `GET /miniapp/specification?token=...` — HTML form
-- `POST /api/specifications` — create specification
+## 11. Deploy на Railway
 
-Requirements:
-
-- `MINI_APP_BASE_URL` must be HTTPS and publicly reachable by Telegram
-- set the same HTTPS URL in BotFather → Bot Settings → Menu Button / Web App domain as needed
-- `MINI_APP_TOKEN_SECRET` must be a random secret and must not equal `TELEGRAM_BOT_TOKEN`
-
-Private chat flow:
-
-1. Open a customer card
-2. Press **Добавить спецификацию**
-3. Open **📝 Открыть форму спецификации**
-4. Fill and save
-
-Group chat flow:
-
-1. Press **Добавить спецификацию** in the group
-2. If the bot can DM you, the Mini App button arrives in private chat
-3. Otherwise the group shows a deep-link button into the private chat
-4. `/start spec_<short_code>` validates a one-time launch code and shows the Mini App button
-
-Note: Telegram deep-link payloads are limited to 64 characters, so group links use a
-short one-time code stored in PostgreSQL (`mini_app_launch_codes`), not the full signed token.
-
-Fallback:
-
-- `/add_specification` still runs the old step-by-step FSM
-- field-by-field specification editing remains available from the customer card
-
-Tests:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## Railway
-
-1. Create a Railway project.
-2. Add a PostgreSQL database and copy its `DATABASE_URL`.
-3. Add all required environment variables, including Mini App settings.
-4. Expose the web port (`WEB_PORT` / `PORT`) so Telegram can open the Mini App URL.
-5. Deploy the repo. `railpack.json` sets the start command:
+1. Создать проект Railway и подключить репозиторий.
+2. Добавить PostgreSQL, скопировать `DATABASE_URL`.
+3. Задать все обязательные env и allowlist сотрудников.
+4. Открыть HTTP-порт сервиса (`PORT` / `WEB_PORT`), чтобы Telegram открывал Mini App по HTTPS.
+5. Старт задаётся в `railpack.json`:
 
 ```bash
 python -m app.main
 ```
 
-## Telegram Group Setup
+После деплоя проверить:
 
-Add the bot to the target Telegram group. If the bot must receive all group
-messages, disable privacy mode for the bot in BotFather.
+- `GET /health`;
+- логи: allowlist не пустой; commit SHA;
+- открытие `/miniapp` из Telegram под allowlisted user.
 
-The bot also works in private chat.
+---
 
-## Contract Template Variables
+## 12. Настройка Telegram Mini App
 
-`templates/customer_contract_template.docx` supports Jinja/docxtpl placeholders, including:
+1. `MINI_APP_BASE_URL` = публичный HTTPS URL (без завершающего `/`).
+2. В BotFather указать домен Web App / Menu Button при необходимости.
+3. Заполнить `TELEGRAM_BOT_USERNAME` и `MINIAPP_ALLOWED_TELEGRAM_USER_IDS`.
+4. Основные страницы:
+   - `/miniapp` — главная (создать / найти клиента);
+   - `/miniapp/customer` — форма клиента / batch;
+   - `/miniapp/specification` — спецификация;
+   - `/miniapp/estimate` — смета.
 
-- `{{ customer.full_name }}` — full name: Last First Patronymic
-- `{{ customer.short_name }}` — short name: Last F. P.
-- `{{ customer.last_name }}`, `{{ customer.first_name }}`, `{{ customer.surname }}`
+Из группы Web App-кнопка в чат группы не ставится: форма уходит в ЛС или через deep link ` /start … ` с одноразовым кодом в `mini_app_launch_codes` (лимит Telegram deep-link payload — 64 символа).
 
-## Database
+HTML-оболочки публичны; **данные и API** требуют валидный `initData` и membership в allowlist.
 
-The bot creates a `documents` table with Telegram metadata, Yandex Disk path,
-processing status, optional function response JSON, and timestamps.
+---
+
+## 13. Безопасность
+
+- Проверка подписи Telegram `initData`, `auth_date`, `telegram_user_id`.
+- Mini App write/read API: только пользователи из `MINIAPP_ALLOWED_TELEGRAM_USER_IDS`.
+- Пустой allowlist при `MINIAPP_TEST_MODE=false` блокирует Mini App API (ERROR в логах при старте).
+- `MINIAPP_TEST_MODE=true` **не** означает «разрешить всем».
+- Launch-токены подписаны секретом, содержат purpose / exp / user id; без PII в токене.
+- Batch API проверяет владельца batch (`telegram_user_id`).
+- Модель доступа к клиентам в Mini App: любой сотрудник из allowlist может искать любого клиента (multi-tenant изоляции нет).
+- Rate limit Mini App — in-memory (на одну реплику).
+- Не логировать OCR-текст и персональные данные в orientation-логах.
+
+---
+
+## 14. Тестирование
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Часть интеграционных тестов требует PostgreSQL (`TEST_DATABASE_URL` или `testing.postgresql`).
+
+Покрываются, в том числе: initData, токены, batch upload/recognition, Mini App ACL, recovery stale batch, автоориентация OCR, спецификации и сметы.
+
+---
+
+## 15. Ограничения
+
+- Распознавание **не гарантирует 100%** точность; нужны ручная проверка и коррекция.
+- Автоориентация не исправляет сильную перспективу, обрезку, блики, размытие, слишком мелкий текст.
+- PDF: multi-angle rotation search в MVP **не** выполняется (страницы рендерятся и OCR’ятся без перебора 90/180/270).
+- Фоновые OCR-задачи — **in-process** (`asyncio` tasks): при рестарте контейнера задача теряется; recovery возвращает stale `recognizing` в `collecting` для повторного запуска (порог `CUSTOMER_BATCH_STALE_PROCESSING_SECONDS`).
+- Нет отдельной очереди (Celery/Redis) и нет multi-replica координации rate limit / background tasks.
+- `min_delay_seconds` OCR передаётся в сервис; между успешными запросами явная пауза в текущем коде не enforced (есть retry backoff и глобальный OCR lock).
+- Calcus работает только при настроенных `CALCUS_*`.
+- HEIC требует `pillow-heif`.
+- Нет опубликованного файла LICENSE в репозитории.
+
+---
+
+## 16. Статус проекта
+
+Рабочий MVP / staging-ready для закрытого круга сотрудников (allowlist).
+
+Активно используются: Telegram bot, Mini App, OCR, GPT, Яндекс Диск, спецификации, сметы, batch recovery, employee allowlist.
+
+Не считать production-ready без: заполненного allowlist, мониторинга зависших batch, осознанной модели доступа к клиентским данным.
+
+---
+
+## 17. Лицензия
+
+Файл лицензии в репозитории не опубликован. Использование регулируется владельцем репозитория, если не указано иное.
