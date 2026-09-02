@@ -1,5 +1,6 @@
 aiogram>=3,<4
 aiohttp>=3,<4
+aiohttp-socks>=0.8,<1
 asyncpg>=0.29,<1
 docxtpl>=0.16,<1
 PyMuPDF>=1.24,<2

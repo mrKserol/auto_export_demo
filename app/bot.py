@@ -6,6 +6,7 @@ import logging
 import uvicorn
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
@@ -43,10 +44,21 @@ from app.yandex_function_client import YandexFunctionClient
 
 
 def create_bot(settings: Settings) -> Bot:
-    return Bot(
-        token=settings.telegram_bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot_kwargs: dict = {
+        "token": settings.telegram_bot_token,
+        "default": DefaultBotProperties(parse_mode=ParseMode.HTML),
+    }
+    if settings.telegram_proxy_url:
+        bot_kwargs["session"] = AiohttpSession(proxy=settings.telegram_proxy_url)
+    return Bot(**bot_kwargs)
+
+
+async def _stop_polling_if_started(dispatcher: Dispatcher) -> None:
+    try:
+        await dispatcher.stop_polling()
+    except RuntimeError as exc:
+        if "Polling is not started" not in str(exc):
+            raise
 
 
 def create_dispatcher() -> Dispatcher:
@@ -92,6 +104,10 @@ async def run_application(settings: Settings) -> None:
             "Mini App employee allowlist configured (%s user ids)",
             len(settings.miniapp_allowed_telegram_user_ids),
         )
+    if settings.telegram_proxy_url:
+        logger.info("Telegram proxy enabled")
+    else:
+        logger.info("Telegram proxy disabled")
 
     bot = create_bot(settings)
     dispatcher = create_dispatcher()
@@ -208,6 +224,6 @@ async def run_application(settings: Settings) -> None:
                 unfinished,
             )
         web_server.should_exit = True
-        await dispatcher.stop_polling()
+        await _stop_polling_if_started(dispatcher)
         await database.close()
         await bot.session.close()

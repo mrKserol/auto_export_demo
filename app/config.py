@@ -25,6 +25,7 @@ class Settings:
     telegram_bot_username: str | None = None
     miniapp_test_mode: bool = False
     miniapp_allowed_telegram_user_ids: frozenset[int] = field(default_factory=frozenset)
+    telegram_proxy_url: str | None = None
     app_commit_sha: str | None = None
 
 
@@ -93,6 +94,13 @@ def _normalize_base_url(value: str) -> str:
     return value.strip().rstrip("/")
 
 
+def _optional_stripped_env(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip()
+
+
 def _resolve_web_port() -> int:
     # Railway and many platforms provide PORT; prefer that first, then WEB_PORT for local overrides.
     for name in ("PORT", "WEB_PORT"):
@@ -158,5 +166,6 @@ def load_settings() -> Settings:
         miniapp_allowed_telegram_user_ids=parse_miniapp_allowed_telegram_user_ids(
             os.getenv("MINIAPP_ALLOWED_TELEGRAM_USER_IDS")
         ),
+        telegram_proxy_url=_optional_stripped_env("TELEGRAM_PROXY_URL"),
         app_commit_sha=resolve_app_commit_sha(),
     )
