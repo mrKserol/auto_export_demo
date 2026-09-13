@@ -26,6 +26,8 @@ class Settings:
     miniapp_test_mode: bool = False
     miniapp_allowed_telegram_user_ids: frozenset[int] = field(default_factory=frozenset)
     telegram_proxy_url: str | None = None
+    n8n_telegram_webhook_url: str | None = None
+    n8n_webhook_secret: str | None = None
     app_commit_sha: str | None = None
 
 
@@ -131,6 +133,14 @@ def load_settings() -> Settings:
             "MINI_APP_TOKEN_SECRET must not be the same as TELEGRAM_BOT_TOKEN"
         )
 
+    n8n_telegram_webhook_url = _optional_stripped_env("N8N_TELEGRAM_WEBHOOK_URL")
+    n8n_webhook_secret = _optional_stripped_env("N8N_WEBHOOK_SECRET")
+    if bool(n8n_telegram_webhook_url) != bool(n8n_webhook_secret):
+        raise RuntimeError(
+            "N8N_TELEGRAM_WEBHOOK_URL and N8N_WEBHOOK_SECRET "
+            "must be configured together"
+        )
+
     return Settings(
         telegram_bot_token=telegram_bot_token,
         database_url=_require_env("DATABASE_URL"),
@@ -167,5 +177,7 @@ def load_settings() -> Settings:
             os.getenv("MINIAPP_ALLOWED_TELEGRAM_USER_IDS")
         ),
         telegram_proxy_url=_optional_stripped_env("TELEGRAM_PROXY_URL"),
+        n8n_telegram_webhook_url=n8n_telegram_webhook_url,
+        n8n_webhook_secret=n8n_webhook_secret,
         app_commit_sha=resolve_app_commit_sha(),
     )

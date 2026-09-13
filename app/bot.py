@@ -18,6 +18,7 @@ from app.handlers.customer_delete import router as customer_delete_router
 from app.handlers.customers import router as customers_router
 from app.handlers.documents import router as documents_router
 from app.handlers.estimates import router as estimates_router
+from app.handlers.n8n_chat import router as n8n_chat_router
 from app.handlers.recognize import router as recognize_router
 from app.handlers.specifications import router as specifications_router
 from app.handlers.start import router as start_router
@@ -72,6 +73,7 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.include_router(estimates_router)
     dispatcher.include_router(recognize_router)
     dispatcher.include_router(documents_router)
+    dispatcher.include_router(n8n_chat_router)
     return dispatcher
 
 
