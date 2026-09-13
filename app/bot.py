@@ -65,6 +65,7 @@ async def _stop_polling_if_started(dispatcher: Dispatcher) -> None:
 def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(start_router)
+    dispatcher.include_router(n8n_chat_router)
     dispatcher.include_router(customer_batch_upload_router)
     dispatcher.include_router(customer_add_router)
     dispatcher.include_router(customers_router)
@@ -73,7 +74,6 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.include_router(estimates_router)
     dispatcher.include_router(recognize_router)
     dispatcher.include_router(documents_router)
-    dispatcher.include_router(n8n_chat_router)
     return dispatcher
 
 

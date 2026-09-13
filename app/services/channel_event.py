@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ChannelName = Literal["telegram", "max", "wechat"]
+ChannelName = Literal["telegram", "max", "wechat", "bitrix"]
 ChannelEventType = Literal["text", "command", "attachment", "callback"]
 AttachmentKind = Literal["document", "photo", "video"]
 
@@ -12,6 +12,7 @@ CUSTOMER_SEARCH_EDIT = "customer.search_edit"
 CUSTOMER_DELETE = "customer.delete"
 SPECIFICATION_ADD = "specification.add"
 DOCUMENT_RECOGNIZE = "document.recognize"
+CUSTOMER_DOCUMENT_UPLOADED = "customer.document.uploaded"
 
 TELEGRAM_COMMAND_ACTIONS: dict[str, str] = {
     "/add_customer": CUSTOMER_ADD,
@@ -43,13 +44,10 @@ class ChannelAttachment:
 @dataclass(frozen=True)
 class ChannelEvent:
     channel: ChannelName
-    user_id: str
-    chat_id: str
-    message_id: str
     type: ChannelEventType
     version: int = 1
     action: str | None = None
-    text: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
     attachments: list[ChannelAttachment] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -57,12 +55,9 @@ class ChannelEvent:
         return {
             "version": self.version,
             "channel": self.channel,
-            "user_id": self.user_id,
-            "chat_id": self.chat_id,
-            "message_id": self.message_id,
             "type": self.type,
             "action": self.action,
-            "text": self.text,
+            "payload": dict(self.payload),
             "attachments": [
                 attachment.to_dict() for attachment in self.attachments
             ],
@@ -83,14 +78,63 @@ def build_telegram_text_event(
     message_id: str,
     metadata: dict[str, Any] | None = None,
 ) -> ChannelEvent:
+    event_metadata = {
+        "user_id": str(user_id),
+        "chat_id": str(chat_id),
+        "message_id": str(message_id),
+    }
+    if metadata is not None:
+        event_metadata.update(metadata)
+
     return ChannelEvent(
         channel="telegram",
-        user_id=str(user_id),
-        chat_id=str(chat_id),
-        message_id=str(message_id),
         type="text",
-        text=text,
-        metadata={} if metadata is None else dict(metadata),
+        payload={"text": text},
+        metadata=event_metadata,
+    )
+
+
+def build_telegram_attachment_event(
+    *,
+    file_id: str,
+    file_unique_id: str,
+    name: str,
+    mime_type: str,
+    kind: AttachmentKind,
+    size: int | None,
+    chat_id: str,
+    user_id: str,
+    message_id: str,
+    media_group_id: str | None = None,
+    caption: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ChannelEvent:
+    event_metadata = {
+        "user_id": str(user_id),
+        "chat_id": str(chat_id),
+        "message_id": str(message_id),
+        "media_group_id": media_group_id,
+        "telegram_file_unique_id": file_unique_id,
+        "caption": caption,
+    }
+    if metadata is not None:
+        event_metadata.update(metadata)
+
+    return ChannelEvent(
+        channel="telegram",
+        type="attachment",
+        action=CUSTOMER_DOCUMENT_UPLOADED,
+        payload={},
+        attachments=[
+            ChannelAttachment(
+                id=file_id,
+                name=name,
+                mime_type=mime_type,
+                kind=kind,
+                size=size,
+            )
+        ],
+        metadata=event_metadata,
     )
 
 
@@ -107,12 +151,13 @@ def build_telegram_command_event(message: Any) -> ChannelEvent | None:
     from_user = getattr(message, "from_user", None)
     return ChannelEvent(
         channel="telegram",
-        user_id="" if from_user is None else str(getattr(from_user, "id", "")),
-        chat_id="" if chat is None else str(getattr(chat, "id", "")),
-        message_id=str(getattr(message, "message_id", "") or ""),
         type="command",
         action=action,
-        text=None,
+        payload={},
         attachments=[],
-        metadata={},
+        metadata={
+            "user_id": "" if from_user is None else str(getattr(from_user, "id", "")),
+            "chat_id": "" if chat is None else str(getattr(chat, "id", "")),
+            "message_id": str(getattr(message, "message_id", "") or ""),
+        },
     )

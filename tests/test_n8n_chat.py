@@ -10,17 +10,21 @@ import httpx
 from aiogram import Bot
 from aiogram.enums import ChatType
 from aiogram.fsm.storage.base import StorageKey
-from aiogram.types import Chat, Message, Update, User
+from aiogram.types import Chat, Document, Message, PhotoSize, Update, User
 
 from app.bot import create_dispatcher
 from app.config import Settings
 from app.handlers.n8n_chat import N8N_UNAVAILABLE_USER_TEXT
+from app.handlers.n8n_chat import N8N_UNSUPPORTED_ATTACHMENT_USER_TEXT
 from app.services.channel_event import (
+    CUSTOMER_DOCUMENT_UPLOADED,
     CUSTOMER_ADD,
     CUSTOMER_DELETE,
     CUSTOMER_SEARCH_EDIT,
     DOCUMENT_RECOGNIZE,
     SPECIFICATION_ADD,
+    ChannelEvent,
+    build_telegram_attachment_event,
     build_telegram_command_event,
     telegram_command_to_action,
 )
@@ -74,6 +78,66 @@ def _message(
         chat=Chat(id=42, type=chat_type),
         from_user=User(id=42, is_bot=False, first_name="Ivan"),
         text=text,
+    )
+
+
+def _photo_message(
+    *,
+    message_id: int = 790,
+    media_group_id: str | None = "album-123",
+    caption: str | None = "Паспорт",
+    chat_type: ChatType = ChatType.PRIVATE,
+) -> Message:
+    return Message(
+        message_id=message_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=456, type=chat_type),
+        from_user=User(id=123, is_bot=False, first_name="Ivan"),
+        photo=[
+            PhotoSize(
+                file_id="small-photo-file-id",
+                file_unique_id="small-photo-unique-id",
+                width=90,
+                height=90,
+                file_size=1000,
+            ),
+            PhotoSize(
+                file_id="large-photo-file-id",
+                file_unique_id="large-photo-unique-id",
+                width=1280,
+                height=960,
+                file_size=123456,
+            ),
+        ],
+        media_group_id=media_group_id,
+        caption=caption,
+    )
+
+
+def _document_message(
+    *,
+    file_name: str | None = "passport.pdf",
+    mime_type: str | None = "application/pdf",
+    file_size: int | None = 345678,
+    message_id: int = 791,
+    media_group_id: str | None = None,
+    caption: str | None = None,
+    chat_type: ChatType = ChatType.PRIVATE,
+) -> Message:
+    return Message(
+        message_id=message_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=456, type=chat_type),
+        from_user=User(id=123, is_bot=False, first_name="Ivan"),
+        document=Document(
+            file_id="document-file-id",
+            file_unique_id="document-unique-id",
+            file_name=file_name,
+            mime_type=mime_type,
+            file_size=file_size,
+        ),
+        media_group_id=media_group_id,
+        caption=caption,
     )
 
 
@@ -148,14 +212,74 @@ class ChannelEventTests(unittest.TestCase):
             {
                 "version": 1,
                 "channel": "telegram",
-                "user_id": "42",
-                "chat_id": "42",
-                "message_id": "7",
                 "type": "command",
                 "action": CUSTOMER_ADD,
-                "text": None,
+                "payload": {},
+                "attachments": [],
+                "metadata": {
+                    "user_id": "42",
+                    "chat_id": "42",
+                    "message_id": "7",
+                },
+            },
+        )
+
+    def test_contract_supports_future_bitrix_channel(self) -> None:
+        event = ChannelEvent(channel="bitrix", type="callback")
+
+        self.assertEqual(
+            event.to_dict(),
+            {
+                "version": 1,
+                "channel": "bitrix",
+                "type": "callback",
+                "action": None,
+                "payload": {},
                 "attachments": [],
                 "metadata": {},
+            },
+        )
+
+    def test_builds_telegram_attachment_event(self) -> None:
+        event = build_telegram_attachment_event(
+            file_id="AgACAgIAAxkBA",
+            file_unique_id="AQADunique",
+            name="photo_790.jpg",
+            mime_type="image/jpeg",
+            kind="photo",
+            size=123456,
+            chat_id="456",
+            user_id="123",
+            message_id="790",
+            media_group_id="12345678901234567",
+            caption="Паспорт",
+        )
+
+        self.assertEqual(
+            event.to_dict(),
+            {
+                "version": 1,
+                "channel": "telegram",
+                "type": "attachment",
+                "action": CUSTOMER_DOCUMENT_UPLOADED,
+                "payload": {},
+                "attachments": [
+                    {
+                        "id": "AgACAgIAAxkBA",
+                        "name": "photo_790.jpg",
+                        "mime_type": "image/jpeg",
+                        "kind": "photo",
+                        "size": 123456,
+                    }
+                ],
+                "metadata": {
+                    "user_id": "123",
+                    "chat_id": "456",
+                    "message_id": "790",
+                    "media_group_id": "12345678901234567",
+                    "telegram_file_unique_id": "AQADunique",
+                    "caption": "Паспорт",
+                },
             },
         )
 
@@ -201,16 +325,64 @@ class N8NChatServiceTests(unittest.IsolatedAsyncioTestCase):
             {
                 "version": 1,
                 "channel": "telegram",
-                "user_id": "42",
-                "chat_id": "42",
-                "message_id": "7",
                 "type": "text",
                 "action": None,
-                "text": "Привет",
+                "payload": {
+                    "text": "Привет",
+                },
                 "attachments": [],
-                "metadata": {},
+                "metadata": {
+                    "user_id": "42",
+                    "chat_id": "42",
+                    "message_id": "7",
+                },
             },
         )
+        self.assertNotIn("text", captured["body"])
+
+    async def test_posts_attachment_payload(self) -> None:
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json=_gpt_payload())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service = N8NChatService(
+            webhook_url=WEBHOOK_URL,
+            webhook_secret=WEBHOOK_SECRET,
+            client=client,
+        )
+        try:
+            reply = await service.send_telegram_attachment(
+                file_id="large-photo-file-id",
+                file_unique_id="large-photo-unique-id",
+                name="photo_790.jpg",
+                mime_type="image/jpeg",
+                kind="photo",
+                size=123456,
+                chat_id="456",
+                user_id="123",
+                message_id="790",
+                media_group_id="album-123",
+                caption="Паспорт",
+            )
+        finally:
+            await client.aclose()
+
+        self.assertEqual(reply, ASSISTANT_TEXT)
+        self.assertEqual(captured["body"]["action"], CUSTOMER_DOCUMENT_UPLOADED)
+        self.assertEqual(
+            captured["body"]["attachments"][0],
+            {
+                "id": "large-photo-file-id",
+                "name": "photo_790.jpg",
+                "mime_type": "image/jpeg",
+                "kind": "photo",
+                "size": 123456,
+            },
+        )
+        self.assertEqual(captured["body"]["metadata"]["media_group_id"], "album-123")
 
     async def test_http_error_raises_service_error(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -267,17 +439,21 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self._call_patcher.stop()
-        key = StorageKey(bot_id=self.bot.id, chat_id=42, user_id=42)
-        await self.dispatcher.storage.set_state(key, None)
-        await self.dispatcher.storage.set_data(key, {})
+        for chat_id, user_id in ((42, 42), (456, 123)):
+            key = StorageKey(bot_id=self.bot.id, chat_id=chat_id, user_id=user_id)
+            await self.dispatcher.storage.set_state(key, None)
+            await self.dispatcher.storage.set_data(key, {})
         await self.bot.session.close()
 
     async def _feed(self, message: Message, *, settings: Settings | None = None) -> None:
+        customer_upload_batch_repository = AsyncMock()
+        customer_upload_batch_repository.get_active_batch.return_value = None
         await self.dispatcher.feed_update(
             self.bot,
             _update(message),
             settings=settings or _settings(),
             database=AsyncMock(),
+            customer_upload_batch_repository=customer_upload_batch_repository,
         )
 
     async def test_private_text_calls_n8n_and_replies(self) -> None:
@@ -353,6 +529,102 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
         send_telegram_text.assert_awaited_once()
         self.assertEqual(_sent_text(self.bot_call), N8N_UNAVAILABLE_USER_TEXT)
         self.assertNotIn(WEBHOOK_SECRET, "\n".join(captured.output))
+
+    async def test_private_photo_calls_n8n_and_replies(self) -> None:
+        send_telegram_attachment = AsyncMock(return_value=ASSISTANT_TEXT)
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_attachment",
+            send_telegram_attachment,
+        ):
+            await self._feed(_photo_message())
+
+        send_telegram_attachment.assert_awaited_once_with(
+            file_id="large-photo-file-id",
+            file_unique_id="large-photo-unique-id",
+            name="photo_790.jpg",
+            mime_type="image/jpeg",
+            kind="photo",
+            size=123456,
+            chat_id="456",
+            user_id="123",
+            message_id="790",
+            media_group_id="album-123",
+            caption="Паспорт",
+        )
+        self.assertEqual(_sent_text(self.bot_call), ASSISTANT_TEXT)
+
+    async def test_private_document_calls_n8n_and_replies(self) -> None:
+        send_telegram_attachment = AsyncMock(return_value=ASSISTANT_TEXT)
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_attachment",
+            send_telegram_attachment,
+        ):
+            await self._feed(_document_message(caption="PDF"))
+
+        send_telegram_attachment.assert_awaited_once_with(
+            file_id="document-file-id",
+            file_unique_id="document-unique-id",
+            name="passport.pdf",
+            mime_type="application/pdf",
+            kind="document",
+            size=345678,
+            chat_id="456",
+            user_id="123",
+            message_id="791",
+            media_group_id=None,
+            caption="PDF",
+        )
+        self.assertEqual(_sent_text(self.bot_call), ASSISTANT_TEXT)
+
+    async def test_disabled_n8n_does_not_send_attachment(self) -> None:
+        send_telegram_attachment = AsyncMock(return_value=ASSISTANT_TEXT)
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_attachment",
+            send_telegram_attachment,
+        ):
+            await self._feed(
+                _photo_message(),
+                settings=_settings(
+                    n8n_telegram_webhook_url=None,
+                    n8n_webhook_secret=None,
+                ),
+            )
+
+        send_telegram_attachment.assert_not_awaited()
+        self.bot_call.assert_not_awaited()
+
+    async def test_unsupported_document_is_not_sent_to_n8n(self) -> None:
+        send_telegram_attachment = AsyncMock(return_value=ASSISTANT_TEXT)
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_attachment",
+            send_telegram_attachment,
+        ):
+            await self._feed(
+                _document_message(
+                    file_name="archive.zip",
+                    mime_type="application/zip",
+                    file_size=100,
+                )
+            )
+
+        send_telegram_attachment.assert_not_awaited()
+        self.assertEqual(_sent_text(self.bot_call), N8N_UNSUPPORTED_ATTACHMENT_USER_TEXT)
+
+    async def test_active_fsm_state_skips_n8n_attachment_handler(self) -> None:
+        key = StorageKey(bot_id=self.bot.id, chat_id=456, user_id=123)
+        await self.dispatcher.storage.set_state(
+            key,
+            "CustomerStates:waiting_passport",
+        )
+        send_telegram_attachment = AsyncMock(return_value=ASSISTANT_TEXT)
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_attachment",
+            send_telegram_attachment,
+        ):
+            await self._feed(_photo_message())
+
+        send_telegram_attachment.assert_not_awaited()
+        self.bot_call.assert_not_awaited()
 
 
 if __name__ == "__main__":

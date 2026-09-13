@@ -5,7 +5,12 @@ import logging
 import httpx
 
 from app.config import Settings
-from app.services.channel_event import ChannelEvent, build_telegram_text_event
+from app.services.channel_event import (
+    AttachmentKind,
+    ChannelEvent,
+    build_telegram_attachment_event,
+    build_telegram_text_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,36 @@ class N8NChatService:
             chat_id=chat_id,
             user_id=user_id,
             message_id=message_id,
+        )
+        return await self.send_event(event)
+
+    async def send_telegram_attachment(
+        self,
+        *,
+        file_id: str,
+        file_unique_id: str,
+        name: str,
+        mime_type: str,
+        kind: AttachmentKind,
+        size: int | None,
+        chat_id: str,
+        user_id: str,
+        message_id: str,
+        media_group_id: str | None = None,
+        caption: str | None = None,
+    ) -> str:
+        event = build_telegram_attachment_event(
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            name=name,
+            mime_type=mime_type,
+            kind=kind,
+            size=size,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=message_id,
+            media_group_id=media_group_id,
+            caption=caption,
         )
         return await self.send_event(event)
 
