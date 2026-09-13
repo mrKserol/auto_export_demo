@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
+from io import BytesIO
 from pathlib import Path
+from secrets import compare_digest
 from typing import Any
+from urllib.parse import quote
 
 from aiogram import Bot
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 from pydantic import ValidationError
 
 from app.config import Settings
@@ -53,6 +58,10 @@ router = APIRouter()
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+class InternalTelegramFileRequest(BaseModel):
+    file_id: str = Field(min_length=1)
+
+
 def error_response(
     status_code: int,
     code: str,
@@ -88,9 +97,74 @@ def get_yandex_disk_client(request: Request) -> YandexDiskClient | None:
     return getattr(request.app.state, "yandex_disk_client", None)
 
 
+def _safe_telegram_filename(file_path: str | None, file_id: str) -> str:
+    if file_path:
+        name = Path(file_path).name
+        if name:
+            return name
+    safe_id = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in file_id
+    )
+    return f"telegram_file_{safe_id or 'unknown'}"
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/internal/n8n/telegram-file")
+async def download_internal_telegram_file(
+    payload: InternalTelegramFileRequest,
+    settings: Settings = Depends(get_settings),
+    bot: Bot = Depends(get_bot),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> Response:
+    expected_secret = settings.n8n_webhook_secret or ""
+    provided_secret = x_n8n_webhook_secret or ""
+    if not expected_secret or not provided_secret or not compare_digest(
+        provided_secret,
+        expected_secret,
+    ):
+        return error_response(401, "UNAUTHORIZED", "Unauthorized")
+
+    try:
+        file = await bot.get_file(payload.file_id)
+        file_path = file.file_path
+        if not file_path:
+            logger.warning("Telegram returned file without path for n8n download")
+            return error_response(
+                502,
+                "TELEGRAM_FILE_ERROR",
+                "Telegram file download failed",
+            )
+
+        buffer = BytesIO()
+        await bot.download_file(file_path, destination=buffer)
+    except Exception:
+        logger.exception("Telegram file download failed for n8n")
+        return error_response(
+            502,
+            "TELEGRAM_FILE_ERROR",
+            "Telegram file download failed",
+        )
+
+    filename = _safe_telegram_filename(file_path, payload.file_id)
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    quoted_filename = quote(filename)
+    return Response(
+        content=buffer.getvalue(),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quoted_filename}"
+            ),
+        },
+    )
 
 
 @router.get("/miniapp/specification")
