@@ -19,6 +19,7 @@ def create_fastapi_app(
     database: Database,
     bot,
     yandex_disk_client=None,
+    customer_document_recognition_service=None,
     customer_batch_recognition_service=None,
     customer_folder_service=None,
 ) -> FastAPI:
@@ -27,6 +28,9 @@ def create_fastapi_app(
     app.state.database = database
     app.state.bot = bot
     app.state.yandex_disk_client = yandex_disk_client
+    app.state.customer_document_recognition_service = (
+        customer_document_recognition_service
+    )
     app.state.customer_batch_recognition_service = customer_batch_recognition_service
     app.state.customer_folder_service = customer_folder_service
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from secrets import compare_digest
@@ -9,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from aiogram import Bot
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from pydantic import ValidationError
@@ -49,6 +51,9 @@ from app.services.customer_batch_verification_service import (
     build_save_warnings,
     format_kit_for_form,
     serialize_batch_file_for_form,
+)
+from app.services.customer_document_recognition_service import (
+    CustomerDocumentRecognitionService,
 )
 from app.yadisk_client import YandexDiskClient
 
@@ -97,6 +102,15 @@ def get_yandex_disk_client(request: Request) -> YandexDiskClient | None:
     return getattr(request.app.state, "yandex_disk_client", None)
 
 
+def get_customer_document_recognition_service(
+    request: Request,
+) -> CustomerDocumentRecognitionService:
+    service = getattr(request.app.state, "customer_document_recognition_service", None)
+    if service is None:
+        raise RuntimeError("Customer document recognition service is not configured")
+    return service
+
+
 def _safe_telegram_filename(file_path: str | None, file_id: str) -> str:
     if file_path:
         name = Path(file_path).name
@@ -107,6 +121,47 @@ def _safe_telegram_filename(file_path: str | None, file_id: str) -> str:
         for char in file_id
     )
     return f"telegram_file_{safe_id or 'unknown'}"
+
+
+def _authorize_n8n_internal_request(
+    settings: Settings,
+    provided_secret: str | None,
+) -> JSONResponse | None:
+    expected_secret = settings.n8n_webhook_secret or ""
+    actual_secret = provided_secret or ""
+    if not expected_secret or not actual_secret or not compare_digest(
+        actual_secret,
+        expected_secret,
+    ):
+        return error_response(401, "UNAUTHORIZED", "Unauthorized")
+    return None
+
+
+def _normalize_customer_document_result(result) -> dict[str, Any]:
+    fields = dict(getattr(result, "extracted_fields", {}) or {})
+    warnings: list[str] = []
+    for warning in getattr(result, "warnings", []) or []:
+        warnings.append(str(warning))
+    for warning in fields.get("warnings") or []:
+        warnings.append(str(warning))
+
+    return {
+        "surname": fields.get("last_name") or fields.get("surname"),
+        "first_name": fields.get("first_name"),
+        "patronymic": fields.get("surname") or fields.get("patronymic"),
+        "passport": fields.get("passport"),
+        "date_issue": fields.get("date_issue"),
+        "department_code": fields.get("department_code"),
+        "birth_date": fields.get("birth_date"),
+        "birth_place": fields.get("birth_place"),
+        "registration_address": fields.get("registration_address"),
+        "snils": fields.get("snils") or fields.get("ipain"),
+        "tin": fields.get("tin"),
+        "document_type": getattr(result, "document_type", None)
+        or fields.get("document_type"),
+        "confidence": getattr(result, "confidence", None),
+        "warnings": warnings,
+    }
 
 
 @router.get("/health")
@@ -124,13 +179,9 @@ async def download_internal_telegram_file(
         alias="X-N8N-Webhook-Secret",
     ),
 ) -> Response:
-    expected_secret = settings.n8n_webhook_secret or ""
-    provided_secret = x_n8n_webhook_secret or ""
-    if not expected_secret or not provided_secret or not compare_digest(
-        provided_secret,
-        expected_secret,
-    ):
-        return error_response(401, "UNAUTHORIZED", "Unauthorized")
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
 
     try:
         file = await bot.get_file(payload.file_id)
@@ -163,6 +214,66 @@ async def download_internal_telegram_file(
             "Content-Disposition": (
                 f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quoted_filename}"
             ),
+        },
+    )
+
+
+@router.post("/internal/n8n/recognize-customer-document")
+async def recognize_internal_customer_document(
+    file: UploadFile = File(...),
+    original_name: str | None = Form(default=None),
+    mime_type: str | None = Form(default=None),
+    settings: Settings = Depends(get_settings),
+    recognition_service: CustomerDocumentRecognitionService = Depends(
+        get_customer_document_recognition_service
+    ),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+
+    temporary_path: str | None = None
+    try:
+        suffix = Path(original_name or file.filename or "").suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary:
+            temporary_path = temporary.name
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                temporary.write(chunk)
+
+        with open(temporary_path, "rb") as temporary:
+            content = temporary.read()
+
+        result = await recognition_service.recognize_document(
+            content=content,
+            mime_type=mime_type or file.content_type,
+            filename=original_name or file.filename,
+        )
+    except Exception:
+        logger.exception("Internal n8n customer document recognition failed")
+        return error_response(
+            502,
+            "DOCUMENT_RECOGNITION_FAILED",
+            "Document recognition failed",
+        )
+    finally:
+        await file.close()
+        if temporary_path:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "document": _normalize_customer_document_result(result),
         },
     )
 

@@ -168,6 +168,7 @@ async def run_application(settings: Settings) -> None:
         database=database,
         bot=bot,
         yandex_disk_client=yandex_disk_client,
+        customer_document_recognition_service=customer_document_recognition_service,
         customer_batch_recognition_service=customer_batch_recognition_service,
         customer_folder_service=customer_folder_service,
     )
