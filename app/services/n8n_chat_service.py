@@ -5,6 +5,7 @@ import logging
 import httpx
 
 from app.config import Settings
+from app.services.channel_event import ChannelEvent, build_telegram_text_event
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +39,16 @@ class N8NChatService:
         user_id: str,
         message_id: str,
     ) -> str:
-        payload = {
-            "channel": "telegram",
-            "text": text,
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "message_id": message_id,
-        }
+        event = build_telegram_text_event(
+            text=text,
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=message_id,
+        )
+        return await self.send_event(event)
+
+    async def send_event(self, event: ChannelEvent) -> str:
+        payload = event.to_dict()
         headers = {N8N_WEBHOOK_SECRET_HEADER: self._webhook_secret}
 
         close_client = False
@@ -92,6 +96,13 @@ class N8NChatService:
 def extract_n8n_assistant_text(payload: object) -> str:
     if not isinstance(payload, dict):
         raise N8NChatError("n8n webhook returned unexpected JSON")
+
+    reply = payload.get("reply")
+    if isinstance(reply, dict):
+        reply_type = reply.get("type")
+        text = reply.get("text")
+        if reply_type == "text" and isinstance(text, str) and text.strip():
+            return text.strip()
 
     result = payload.get("result")
     if not isinstance(result, dict):

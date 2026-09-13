@@ -15,6 +15,15 @@ from aiogram.types import Chat, Message, Update, User
 from app.bot import create_dispatcher
 from app.config import Settings
 from app.handlers.n8n_chat import N8N_UNAVAILABLE_USER_TEXT
+from app.services.channel_event import (
+    CUSTOMER_ADD,
+    CUSTOMER_DELETE,
+    CUSTOMER_SEARCH_EDIT,
+    DOCUMENT_RECOGNIZE,
+    SPECIFICATION_ADD,
+    build_telegram_command_event,
+    telegram_command_to_action,
+)
 from app.services.n8n_chat_service import (
     N8NChatError,
     N8NChatService,
@@ -86,6 +95,14 @@ class ExtractN8NAssistantTextTests(unittest.TestCase):
             "hello",
         )
 
+    def test_extracts_normalized_n8n_reply_text(self) -> None:
+        self.assertEqual(
+            extract_n8n_assistant_text(
+                {"ok": True, "reply": {"type": "text", "text": "  hello  "}}
+            ),
+            "hello",
+        )
+
     def test_malformed_payload_raises(self) -> None:
         cases = [
             None,
@@ -103,6 +120,44 @@ class ExtractN8NAssistantTextTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaises(N8NChatError):
                     extract_n8n_assistant_text(payload)
+
+
+class ChannelEventTests(unittest.TestCase):
+    def test_telegram_command_actions_are_centralized(self) -> None:
+        cases = {
+            "/add_customer": CUSTOMER_ADD,
+            "/search_edit_customer": CUSTOMER_SEARCH_EDIT,
+            "/delete_customer": CUSTOMER_DELETE,
+            "/add_specification": SPECIFICATION_ADD,
+            "/recognize_document": DOCUMENT_RECOGNIZE,
+            "/add_customer@AutoExportBot": CUSTOMER_ADD,
+        }
+        for command, action in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(telegram_command_to_action(command), action)
+
+        self.assertIsNone(telegram_command_to_action("/add_customer_legacy"))
+
+    def test_builds_telegram_command_event_without_dispatcher_wiring(self) -> None:
+        event = build_telegram_command_event(_message(text="/add_customer"))
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(
+            event.to_dict(),
+            {
+                "version": 1,
+                "channel": "telegram",
+                "user_id": "42",
+                "chat_id": "42",
+                "message_id": "7",
+                "type": "command",
+                "action": CUSTOMER_ADD,
+                "text": None,
+                "attachments": [],
+                "metadata": {},
+            },
+        )
 
 
 class N8NChatServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -144,11 +199,16 @@ class N8NChatServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             captured["body"],
             {
+                "version": 1,
                 "channel": "telegram",
-                "text": "Привет",
-                "chat_id": "42",
                 "user_id": "42",
+                "chat_id": "42",
                 "message_id": "7",
+                "type": "text",
+                "action": None,
+                "text": "Привет",
+                "attachments": [],
+                "metadata": {},
             },
         )
 
