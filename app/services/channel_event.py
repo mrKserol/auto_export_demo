@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ChannelName = Literal["telegram", "max", "wechat", "bitrix"]
+ChannelName = Literal["telegram", "whatsapp", "wechat", "max", "bitrix"]
 ChannelEventType = Literal["text", "command", "attachment", "callback"]
 AttachmentKind = Literal["document", "photo", "video"]
 
@@ -13,6 +13,10 @@ CUSTOMER_DELETE = "customer.delete"
 SPECIFICATION_ADD = "specification.add"
 DOCUMENT_RECOGNIZE = "document.recognize"
 CUSTOMER_DOCUMENT_UPLOADED = "customer.document.uploaded"
+INTAKE_START = "intake.start"
+INTAKE_DOCUMENT_UPLOADED = "intake.document.uploaded"
+INTAKE_FINISH = "intake.finish"
+INTAKE_CANCEL = "intake.cancel"
 
 TELEGRAM_COMMAND_ACTIONS: dict[str, str] = {
     "/add_customer": CUSTOMER_ADD,

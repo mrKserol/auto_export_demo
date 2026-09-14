@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from uuid import UUID
+
+import asyncpg
+
+
+def _record_to_dict(record: asyncpg.Record | None) -> dict | None:
+    if record is None:
+        return None
+    data = dict(record)
+    for key in ("metadata", "recognition_result", "warnings"):
+        value = data.get(key)
+        if isinstance(value, str):
+            data[key] = json.loads(value)
+    return data
+
+
+class DocumentIntakeRepository:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def get_active_session(
+        self,
+        *,
+        channel: str,
+        external_user_id: str,
+        conversation_id: str,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM document_intake_sessions
+                WHERE started_channel = $1
+                  AND started_external_user_id = $2
+                  AND started_conversation_id = $3
+                  AND status = 'collecting'
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                channel,
+                external_user_id,
+                conversation_id,
+            )
+            return _record_to_dict(row)
+
+    async def create_session(
+        self,
+        *,
+        session_id: UUID,
+        channel: str,
+        external_user_id: str,
+        conversation_id: str,
+        expires_at: datetime,
+        metadata: dict,
+    ) -> dict:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO document_intake_sessions (
+                    id,
+                    started_channel,
+                    started_external_user_id,
+                    started_conversation_id,
+                    expires_at,
+                    metadata
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                RETURNING *;
+                """,
+                session_id,
+                channel,
+                external_user_id,
+                conversation_id,
+                expires_at,
+                json.dumps(metadata, ensure_ascii=False),
+            )
+            result = _record_to_dict(row)
+            assert result is not None
+            return result
+
+    async def get_session(self, session_id: UUID) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM document_intake_sessions WHERE id = $1;",
+                session_id,
+            )
+            return _record_to_dict(row)
+
+    async def update_session_status(self, session_id: UUID, status: str) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE document_intake_sessions
+                SET status = $2,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                session_id,
+                status,
+            )
+            return _record_to_dict(row)
+
+    async def find_duplicate_document(
+        self,
+        *,
+        session_id: UUID,
+        provider_file_id: str | None,
+        content_sha256: str,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            if provider_file_id:
+                row = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM document_intake_documents
+                    WHERE session_id = $1
+                      AND provider_file_id = $2
+                    LIMIT 1;
+                    """,
+                    session_id,
+                    provider_file_id,
+                )
+                if row is not None:
+                    return _record_to_dict(row)
+            row = await connection.fetchrow(
+                """
+                SELECT *
+                FROM document_intake_documents
+                WHERE session_id = $1
+                  AND content_sha256 = $2
+                LIMIT 1;
+                """,
+                session_id,
+                content_sha256,
+            )
+            return _record_to_dict(row)
+
+    async def create_document(self, **values) -> dict:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO document_intake_documents (
+                    id,
+                    session_id,
+                    status,
+                    channel,
+                    external_user_id,
+                    conversation_id,
+                    provider_message_id,
+                    provider_file_id,
+                    media_group_id,
+                    original_name,
+                    mime_type,
+                    file_size,
+                    content_sha256,
+                    storage_path,
+                    document_type,
+                    recognition_result,
+                    confidence,
+                    warnings
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb
+                )
+                RETURNING *;
+                """,
+                values["id"],
+                values["session_id"],
+                values["status"],
+                values["channel"],
+                values["external_user_id"],
+                values["conversation_id"],
+                values.get("provider_message_id"),
+                values.get("provider_file_id"),
+                values.get("media_group_id"),
+                values.get("original_name"),
+                values.get("mime_type"),
+                values.get("file_size"),
+                values["content_sha256"],
+                values.get("storage_path"),
+                values.get("document_type"),
+                json.dumps(values.get("recognition_result"), ensure_ascii=False),
+                values.get("confidence"),
+                json.dumps(values.get("warnings") or [], ensure_ascii=False),
+            )
+            result = _record_to_dict(row)
+            assert result is not None
+            return result
+
+    async def list_documents(self, session_id: UUID) -> list[dict]:
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT *
+                FROM document_intake_documents
+                WHERE session_id = $1
+                ORDER BY created_at, id;
+                """,
+                session_id,
+            )
+            return [_record_to_dict(row) for row in rows if row is not None]

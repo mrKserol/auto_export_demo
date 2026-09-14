@@ -9,6 +9,7 @@ from pathlib import Path
 from secrets import compare_digest
 from typing import Any
 from urllib.parse import quote
+from uuid import UUID
 
 from aiogram import Bot
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
@@ -55,6 +56,11 @@ from app.services.customer_batch_verification_service import (
 from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
+from app.services.document_intake_service import (
+    DocumentIntakeError,
+    DocumentIntakeService,
+    IntakeUpload,
+)
 from app.yadisk_client import YandexDiskClient
 
 logger = logging.getLogger(__name__)
@@ -65,6 +71,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 class InternalTelegramFileRequest(BaseModel):
     file_id: str = Field(min_length=1)
+
+
+class InternalIntakeSessionCreateRequest(BaseModel):
+    channel: str = Field(min_length=1)
+    external_user_id: str = Field(min_length=1)
+    conversation_id: str = Field(min_length=1)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 def error_response(
@@ -108,6 +121,13 @@ def get_customer_document_recognition_service(
     service = getattr(request.app.state, "customer_document_recognition_service", None)
     if service is None:
         raise RuntimeError("Customer document recognition service is not configured")
+    return service
+
+
+def get_document_intake_service(request: Request) -> DocumentIntakeService:
+    service = getattr(request.app.state, "document_intake_service", None)
+    if service is None:
+        raise RuntimeError("Document intake service is not configured")
     return service
 
 
@@ -162,6 +182,10 @@ def _normalize_customer_document_result(result) -> dict[str, Any]:
         "confidence": getattr(result, "confidence", None),
         "warnings": warnings,
     }
+
+
+def _intake_error_response(error: DocumentIntakeError) -> JSONResponse:
+    return error_response(error.status_code, error.code, str(error))
 
 
 @router.get("/health")
@@ -276,6 +300,159 @@ async def recognize_internal_customer_document(
             "document": _normalize_customer_document_result(result),
         },
     )
+
+
+@router.post("/internal/n8n/intake-sessions")
+async def create_internal_intake_session(
+    payload: InternalIntakeSessionCreateRequest,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        result = await intake_service.create_or_get_session(
+            channel=payload.channel,
+            external_user_id=payload.external_user_id,
+            conversation_id=payload.conversation_id,
+            metadata=payload.metadata,
+        )
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content=result)
+
+
+@router.post("/internal/n8n/intake-sessions/{session_id}/documents")
+async def add_internal_intake_document(
+    session_id: UUID,
+    file: UploadFile = File(...),
+    channel: str = Form(...),
+    external_user_id: str = Form(...),
+    conversation_id: str = Form(...),
+    provider_message_id: str | None = Form(default=None),
+    provider_file_id: str | None = Form(default=None),
+    media_group_id: str | None = Form(default=None),
+    original_name: str | None = Form(default=None),
+    mime_type: str | None = Form(default=None),
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+
+    temporary_path: str | None = None
+    try:
+        suffix = Path(original_name or file.filename or "").suffix
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temporary:
+            temporary_path = temporary.name
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                temporary.write(chunk)
+
+        with open(temporary_path, "rb") as temporary:
+            content = temporary.read()
+
+        result = await intake_service.add_document(
+            session_id,
+            IntakeUpload(
+                content=content,
+                channel=channel,
+                external_user_id=external_user_id,
+                conversation_id=conversation_id,
+                provider_message_id=provider_message_id,
+                provider_file_id=provider_file_id,
+                media_group_id=media_group_id,
+                original_name=original_name or file.filename,
+                mime_type=mime_type or file.content_type,
+                file_size=len(content),
+            ),
+        )
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    except Exception:
+        logger.exception("Internal n8n intake document upload failed")
+        return error_response(500, "INTAKE_DOCUMENT_UPLOAD_FAILED", "Upload failed")
+    finally:
+        await file.close()
+        if temporary_path:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
+
+    return JSONResponse(content=result)
+
+
+@router.get("/internal/n8n/intake-sessions/{session_id}")
+async def get_internal_intake_session(
+    session_id: UUID,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        result = await intake_service.get_summary(session_id)
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content=result)
+
+
+@router.post("/internal/n8n/intake-sessions/{session_id}/finish")
+async def finish_internal_intake_session(
+    session_id: UUID,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        result = await intake_service.finish(session_id)
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content=result)
+
+
+@router.post("/internal/n8n/intake-sessions/{session_id}/cancel")
+async def cancel_internal_intake_session(
+    session_id: UUID,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        result = await intake_service.cancel(session_id)
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content=result)
 
 
 @router.get("/miniapp/specification")

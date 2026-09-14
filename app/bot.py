@@ -25,6 +25,7 @@ from app.handlers.start import router as start_router
 from app.repositories.customer_upload_batch_repository import (
     CustomerUploadBatchRepository,
 )
+from app.repositories.document_intake_repository import DocumentIntakeRepository
 from app.services.customer_batch_recognition_service import (
     CustomerBatchRecognitionService,
 )
@@ -32,6 +33,7 @@ from app.services.customer_document_recognition_service import (
     CustomerDocumentRecognitionService,
 )
 from app.services.customer_folder_service import CustomerFolderService
+from app.services.document_intake_service import DocumentIntakeService
 from app.services.estimate_recognition_service import EstimateRecognitionService
 from app.services.miniapp_background_tasks import pending_miniapp_task_count
 from app.services.miniapp_batch_api_service import (
@@ -152,6 +154,12 @@ async def run_application(settings: Settings) -> None:
         repository=customer_upload_batch_repository,
         yandex_disk_client=yandex_disk_client,
     )
+    document_intake_service = DocumentIntakeService(
+        repository=DocumentIntakeRepository(database.pool),
+        recognition_service=customer_document_recognition_service,
+        yandex_disk_client=yandex_disk_client,
+        max_file_bytes=settings.customer_upload_max_file_bytes,
+    )
 
     recovered = await recover_stale_miniapp_batches_on_startup(
         customer_upload_batch_repository,
@@ -169,6 +177,7 @@ async def run_application(settings: Settings) -> None:
         bot=bot,
         yandex_disk_client=yandex_disk_client,
         customer_document_recognition_service=customer_document_recognition_service,
+        document_intake_service=document_intake_service,
         customer_batch_recognition_service=customer_batch_recognition_service,
         customer_folder_service=customer_folder_service,
     )

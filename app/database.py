@@ -156,6 +156,47 @@ CREATE TABLE IF NOT EXISTS customer_upload_batch_files (
 );
 """
 
+CREATE_DOCUMENT_INTAKE_SESSIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS document_intake_sessions (
+    id UUID PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'collecting',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    started_channel TEXT NOT NULL,
+    started_external_user_id TEXT NOT NULL,
+    started_conversation_id TEXT NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+"""
+
+CREATE_DOCUMENT_INTAKE_DOCUMENTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS document_intake_documents (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL
+        REFERENCES document_intake_sessions(id)
+        ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'received',
+    channel TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    provider_message_id TEXT,
+    provider_file_id TEXT,
+    media_group_id TEXT,
+    original_name TEXT,
+    mime_type TEXT,
+    file_size BIGINT,
+    content_sha256 TEXT NOT NULL,
+    storage_path TEXT,
+    document_type TEXT,
+    recognition_result JSONB,
+    confidence DOUBLE PRECISION,
+    warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 CREATE_CARS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS cars (
     id BIGSERIAL PRIMARY KEY,
@@ -407,6 +448,29 @@ CREATE_INDEXES_SQL = [
     CREATE INDEX IF NOT EXISTS idx_customer_upload_batch_files_batch
     ON customer_upload_batch_files(batch_id);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_document_intake_sessions_active
+    ON document_intake_sessions (
+        started_channel,
+        started_external_user_id,
+        started_conversation_id,
+        status,
+        created_at DESC
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_document_intake_documents_session
+    ON document_intake_documents(session_id);
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_document_intake_provider_file
+    ON document_intake_documents(session_id, provider_file_id)
+    WHERE provider_file_id IS NOT NULL;
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_document_intake_content
+    ON document_intake_documents(session_id, content_sha256);
+    """,
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -495,6 +559,8 @@ class Database:
             await connection.execute(CREATE_MINI_APP_LAUNCH_CODES_TABLE_SQL)
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCHES_TABLE_SQL)
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL)
+            await connection.execute(CREATE_DOCUMENT_INTAKE_SESSIONS_TABLE_SQL)
+            await connection.execute(CREATE_DOCUMENT_INTAKE_DOCUMENTS_TABLE_SQL)
             for statement in ENSURE_MINI_APP_LAUNCH_CODES_COLUMNS_SQL:
                 try:
                     await connection.execute(statement)
