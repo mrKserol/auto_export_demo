@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS document_intake_documents (
     file_size BIGINT,
     content_sha256 TEXT NOT NULL,
     storage_path TEXT,
+    storage_status TEXT NOT NULL DEFAULT 'pending',
     document_type TEXT,
     recognition_result JSONB,
     confidence DOUBLE PRECISION,
@@ -461,6 +462,10 @@ CREATE_INDEXES_SQL = [
     """
     CREATE INDEX IF NOT EXISTS idx_document_intake_documents_session
     ON document_intake_documents(session_id);
+    """,
+    """
+    ALTER TABLE document_intake_documents
+    ADD COLUMN IF NOT EXISTS storage_status TEXT NOT NULL DEFAULT 'pending';
     """,
     """
     CREATE UNIQUE INDEX IF NOT EXISTS uq_document_intake_provider_file

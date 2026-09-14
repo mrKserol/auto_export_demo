@@ -12,6 +12,8 @@ from app.services.document_intake_service import (
     INTAKE_STATUS_CANCELLED,
     INTAKE_STATUS_EXPIRED,
     INTAKE_STATUS_REVIEW,
+    STORAGE_STATUS_FAILED,
+    STORAGE_STATUS_STORED,
     DocumentIntakeService,
     IntakeConflictError,
     IntakeUpload,
@@ -97,6 +99,22 @@ class FakeDocumentIntakeRepository:
         document["updated_at"] = now
         self.documents[document["session_id"]].append(document)
         return dict(document)
+
+    async def update_document_storage(
+        self,
+        *,
+        document_id,
+        storage_path,
+        storage_status,
+    ):
+        for documents in self.documents.values():
+            for document in documents:
+                if document["id"] == document_id:
+                    document["storage_path"] = storage_path
+                    document["storage_status"] = storage_status
+                    document["updated_at"] = datetime.now(timezone.utc)
+                    return dict(document)
+        return None
 
     async def list_documents(self, session_id):
         return [dict(document) for document in self.documents.get(session_id, [])]
@@ -261,6 +279,51 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(summary["ready_for_confirmation"])
         self.assertEqual(summary["reasons"], [])
+
+    async def test_storage_failure_blocks_confirmation_until_duplicate_retry_succeeds(self) -> None:
+        session_id = await self._session_id()
+        self.disk.upload_bytes.side_effect = RuntimeError("disk unavailable")
+        self.recognition.recognize_document.side_effect = [
+            SimpleNamespace(document_type=name, confidence=0.9, extracted_fields={}, warnings=[])
+            for name in ("passport_main", "passport_registration", "tin", "snils")
+        ]
+
+        for index, content in enumerate((b"pm", b"pr", b"tin", b"snils")):
+            await self.service.add_document(
+                session_id,
+                _upload(content, provider_file_id=f"file-{index}"),
+            )
+
+        summary = await self.service.finish(session_id)
+        self.assertFalse(summary["ready_for_confirmation"])
+        self.assertIn("storage_not_ready", summary["reasons"])
+        self.assertEqual(summary["storage_not_ready_count"], 4)
+        self.assertTrue(
+            all(
+                document["storage_status"] == STORAGE_STATUS_FAILED
+                for document in summary["documents"]
+            )
+        )
+
+        self.repository.sessions[session_id]["status"] = "collecting"
+        self.disk.upload_bytes.side_effect = lambda path, content: path
+        for index, content in enumerate((b"pm", b"pr", b"tin", b"snils")):
+            response = await self.service.add_document(
+                session_id,
+                _upload(content, provider_file_id=f"file-{index}"),
+            )
+            self.assertTrue(response["duplicate"])
+
+        summary = await self.service.finish(session_id)
+        self.assertTrue(summary["ready_for_confirmation"])
+        self.assertEqual(summary["storage_not_ready_count"], 0)
+        self.assertTrue(
+            all(
+                document["storage_status"] == STORAGE_STATUS_STORED
+                for document in summary["documents"]
+            )
+        )
+        self.assertEqual(self.recognition.recognize_document.await_count, 4)
 
     async def test_rejects_upload_to_review_cancelled_or_expired_session(self) -> None:
         session_id = await self._session_id()

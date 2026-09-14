@@ -158,13 +158,14 @@ class DocumentIntakeRepository:
                     file_size,
                     content_sha256,
                     storage_path,
+                    storage_status,
                     document_type,
                     recognition_result,
                     confidence,
                     warnings
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb
+                    $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19::jsonb
                 )
                 RETURNING *;
                 """,
@@ -182,6 +183,7 @@ class DocumentIntakeRepository:
                 values.get("file_size"),
                 values["content_sha256"],
                 values.get("storage_path"),
+                values.get("storage_status"),
                 values.get("document_type"),
                 json.dumps(values.get("recognition_result"), ensure_ascii=False),
                 values.get("confidence"),
@@ -190,6 +192,29 @@ class DocumentIntakeRepository:
             result = _record_to_dict(row)
             assert result is not None
             return result
+
+    async def update_document_storage(
+        self,
+        *,
+        document_id: UUID,
+        storage_path: str | None,
+        storage_status: str,
+    ) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE document_intake_documents
+                SET storage_path = $2,
+                    storage_status = $3,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                document_id,
+                storage_path,
+                storage_status,
+            )
+            return _record_to_dict(row)
 
     async def list_documents(self, session_id: UUID) -> list[dict]:
         async with self._pool.acquire() as connection:

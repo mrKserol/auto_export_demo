@@ -33,6 +33,10 @@ DOCUMENT_STATUS_RECEIVED = "received"
 DOCUMENT_STATUS_RECOGNIZED = "recognized"
 DOCUMENT_STATUS_FAILED = "failed"
 
+STORAGE_STATUS_PENDING = "pending"
+STORAGE_STATUS_STORED = "stored"
+STORAGE_STATUS_FAILED = "failed"
+
 DEFAULT_REQUIRED_DOCUMENT_TYPES = (
     "passport_main",
     "passport_registration",
@@ -131,13 +135,26 @@ class DocumentIntakeService:
             content_sha256=content_sha256,
         )
         if duplicate is not None:
+            if duplicate.get("storage_status") != STORAGE_STATUS_STORED:
+                storage_path, storage_status = await self._store_draft_file(
+                    session_id,
+                    upload,
+                )
+                if storage_status == STORAGE_STATUS_STORED:
+                    updated = await self.repository.update_document_storage(
+                        document_id=duplicate["id"],
+                        storage_path=storage_path,
+                        storage_status=storage_status,
+                    )
+                    if updated is not None:
+                        duplicate = updated
             return self._document_response(
                 session,
                 duplicate,
                 duplicate=True,
             )
 
-        storage_path = await self._store_draft_file(session_id, upload)
+        storage_path, storage_status = await self._store_draft_file(session_id, upload)
         status = DOCUMENT_STATUS_RECOGNIZED
         recognition_payload: dict | None = None
         document_type = None
@@ -176,6 +193,7 @@ class DocumentIntakeService:
             file_size=upload.file_size,
             content_sha256=content_sha256,
             storage_path=storage_path,
+            storage_status=storage_status,
             document_type=document_type,
             recognition_result=recognition_payload,
             confidence=confidence,
@@ -203,6 +221,8 @@ class DocumentIntakeService:
             reasons.append("duplicate_document_types")
         if summary["failed_document_count"]:
             reasons.append("failed_documents")
+        if summary["storage_not_ready_count"]:
+            reasons.append("storage_not_ready")
         summary["ready_for_confirmation"] = not reasons
         summary["reasons"] = reasons
         return summary
@@ -268,6 +288,8 @@ class DocumentIntakeService:
         for document in documents:
             for warning in document.get("warnings") or []:
                 warnings.append(str(warning))
+            if document.get("storage_status") != STORAGE_STATUS_STORED:
+                warnings.append("storage_not_ready")
 
         return {
             **self._session_payload(session),
@@ -276,6 +298,11 @@ class DocumentIntakeService:
             "duplicate_document_types": duplicates,
             "failed_document_count": sum(
                 1 for document in documents if document.get("status") == DOCUMENT_STATUS_FAILED
+            ),
+            "storage_not_ready_count": sum(
+                1
+                for document in documents
+                if document.get("storage_status") != STORAGE_STATUS_STORED
             ),
             "warnings": warnings,
             "documents": [self._document_summary(document) for document in documents],
@@ -288,6 +315,8 @@ class DocumentIntakeService:
             "document_id": str(document["id"]),
             "duplicate": duplicate,
             "status": document["status"],
+            "storage_status": document.get("storage_status"),
+            "storage_path": document.get("storage_path"),
             "document": document.get("recognition_result") or {},
         }
 
@@ -306,6 +335,7 @@ class DocumentIntakeService:
             "file_size": document.get("file_size"),
             "content_sha256": document.get("content_sha256"),
             "storage_path": document.get("storage_path"),
+            "storage_status": document.get("storage_status"),
             "document_type": document.get("document_type"),
             "confidence": document.get("confidence"),
             "warnings": document.get("warnings") or [],
@@ -323,19 +353,22 @@ class DocumentIntakeService:
         self,
         session_id: UUID,
         upload: IntakeUpload,
-    ) -> str | None:
+    ) -> tuple[str | None, str]:
         if self.yandex_disk_client is None:
-            return None
+            return None, STORAGE_STATUS_PENDING
         name = _safe_filename(upload.original_name or "document.bin")
         path = (
             f"{self.yandex_disk_client.base_path}/02_Клиенты/"
             f"00_Черновики/{session_id}/{name}"
         )
         try:
-            return await self.yandex_disk_client.upload_bytes(path, upload.content)
+            return (
+                await self.yandex_disk_client.upload_bytes(path, upload.content),
+                STORAGE_STATUS_STORED,
+            )
         except Exception:
             logger.exception("Document intake draft upload failed")
-            return None
+            return None, STORAGE_STATUS_FAILED
 
     @staticmethod
     def _validate_channel_context(
