@@ -6,7 +6,9 @@ from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatType
 from aiogram.filters import Command, StateFilter
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from uuid import UUID
+
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 from app.config import Settings
 from app.repositories.customer_upload_batch_repository import (
@@ -18,6 +20,7 @@ from app.services.n8n_chat_service import (
     N8NChatService,
     n8n_chat_configured,
 )
+from app.services.document_intake_service import DocumentIntakeError, DocumentIntakeService
 
 router = Router(name="n8n_chat")
 logger = logging.getLogger(__name__)
@@ -30,6 +33,29 @@ N8N_UNSUPPORTED_ATTACHMENT_USER_TEXT = (
 )
 SUPPORTED_DOCUMENT_MIME_TYPES = {"application/pdf"}
 INTAKE_COMMANDS = ("intake_start", "intake_finish", "intake_cancel")
+
+
+@router.callback_query(F.data.startswith("intake.add_client:"))
+async def handle_intake_add_client_callback(
+    callback: CallbackQuery,
+    intake_service: DocumentIntakeService,
+) -> None:
+    session_text = (callback.data or "").split(":", 1)[-1]
+    try:
+        session_id = UUID(session_text)
+        if callback.from_user is None or callback.message is None:
+            raise ValueError
+        await intake_service.validate_session_owner(
+            session_id,
+            external_user_id=str(callback.from_user.id),
+            conversation_id=str(callback.message.chat.id),
+        )
+    except (ValueError, DocumentIntakeError):
+        await callback.answer("Нет доступа к этой intake-сессии", show_alert=True)
+        return
+
+    await callback.answer("Проверяю клиента по паспорту…")
+    await callback.message.answer("Проверяю клиента по паспорту…")
 
 
 @router.message(
@@ -52,6 +78,17 @@ async def handle_n8n_intake_command(message: Message, settings: Settings) -> Non
         await message.answer(N8N_UNAVAILABLE_USER_TEXT)
         return
 
+    if isinstance(reply, dict) and reply.get("type") == "intake_card":
+        keyboard = []
+        for button in reply.get("keyboard", []):
+            if not isinstance(button, dict):
+                continue
+            if button.get("type") == "web_app" and isinstance(button.get("url"), str):
+                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), web_app=WebAppInfo(url=button["url"]))])
+            elif button.get("type") == "callback":
+                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=f"intake.add_client:{reply['session_id']}")])
+        await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        return
     if isinstance(reply, dict) and reply.get("type") == "web_app":
         await message.answer(
             reply["text"],

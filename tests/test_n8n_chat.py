@@ -528,6 +528,26 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(button.text, reply["button_text"])
         self.assertEqual(button.web_app.url, reply["url"])
 
+    async def test_intake_card_reply_creates_two_keyboard_rows(self) -> None:
+        reply = {
+            "type": "intake_card",
+            "text": "Распознанные данные клиента",
+            "session_id": "11111111-1111-1111-1111-111111111111",
+            "keyboard": [
+                {"type": "web_app", "text": "✏️ Ручная коррекция", "url": "https://api.ulkar.ru/miniapp/customer?token=x"},
+                {"type": "callback", "text": "➕ Добавить клиента", "action": "intake.add_client"},
+            ],
+        }
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_command",
+            AsyncMock(return_value=reply),
+        ):
+            await self._feed(_message(text="/intake_finish"))
+
+        method = self.bot_call.await_args.args[0]
+        self.assertEqual(len(method.reply_markup.inline_keyboard), 2)
+        self.assertEqual(method.reply_markup.inline_keyboard[1][0].callback_data, "intake.add_client:11111111-1111-1111-1111-111111111111")
+
     async def test_slash_command_is_not_sent_to_n8n(self) -> None:
         send_telegram_text = AsyncMock(return_value=ASSISTANT_TEXT)
         with patch(

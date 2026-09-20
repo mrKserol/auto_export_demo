@@ -172,6 +172,16 @@ def extract_n8n_reply(payload: object) -> dict[str, str]:
                 "button_text": reply["button_text"].strip(),
                 "url": reply["url"],
             }
+        if reply_type == "intake_card" and isinstance(text, str) and text.strip():
+            keyboard = reply.get("keyboard")
+            session_id = reply.get("session_id")
+            if isinstance(keyboard, list) and isinstance(session_id, str) and session_id:
+                return {
+                    "type": "intake_card",
+                    "text": text.strip(),
+                    "session_id": session_id,
+                    "keyboard": keyboard,
+                }
 
     result = payload.get("result")
     if not isinstance(result, dict):

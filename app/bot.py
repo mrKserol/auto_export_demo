@@ -202,6 +202,7 @@ async def run_application(settings: Settings) -> None:
             customer_upload_batch_repository=customer_upload_batch_repository,
             customer_batch_recognition_service=customer_batch_recognition_service,
             customer_folder_service=customer_folder_service,
+            document_intake_service=document_intake_service,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",

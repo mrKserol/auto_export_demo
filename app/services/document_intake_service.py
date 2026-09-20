@@ -239,6 +239,32 @@ class DocumentIntakeService:
         session = await self._expire_if_needed(session) or session
         return await self._review_summary(session)
 
+    async def set_review_message(self, session_id: UUID, *, chat_id: str, message_id: str) -> dict:
+        session = await self._get_session_or_404(session_id)
+        metadata = dict(session.get("metadata") or {})
+        metadata["review_message"] = {"chat_id": str(chat_id), "message_id": str(message_id)}
+        updated = await self.repository.update_session_metadata(session_id, metadata)
+        assert updated is not None
+        return updated
+
+    async def get_review_session(self, session_id: UUID) -> dict:
+        return await self._get_session_or_404(session_id)
+
+    async def validate_session_owner(
+        self,
+        session_id: UUID,
+        *,
+        external_user_id: str,
+        conversation_id: str,
+    ) -> dict:
+        session = await self._get_session_or_404(session_id)
+        if (
+            session["started_external_user_id"] != str(external_user_id)
+            or session["started_conversation_id"] != str(conversation_id)
+        ):
+            raise IntakeConflictError("Intake session owner mismatch")
+        return session
+
     async def validate_review_launch(
         self,
         session_id: UUID,
@@ -599,6 +625,40 @@ def _clean_manual_corrections(corrections: dict) -> dict:
                 continue
         cleaned[key] = value
     return cleaned
+
+
+def build_intake_review_card(summary: dict) -> str:
+    values = summary.get("effective_values") or {}
+    value = lambda key: str(values.get(key) or "не распознано")
+    checklist = summary.get("checklist") or {}
+    checklist_text = ", ".join(
+        f"{'✅' if checklist.get(key) else '❌'} {label}"
+        for key, label in (
+            ("passport_main", "Паспорт"),
+            ("passport_registration", "Регистрация"),
+            ("snils", "СНИЛС"),
+            ("tin", "ИНН"),
+        )
+    )
+    warnings = summary.get("warnings") or []
+    warning_text = "\n".join(f"• {warning}" for warning in warnings) or "нет"
+    return (
+        "Распознанные данные клиента\n\n"
+        f"ФИО: {value('surname')} {value('first_name')} {value('patronymic')}\n"
+        f"Место рождения: {value('birth_place')}\n"
+        f"Паспорт: {value('passport')}\n"
+        f"Дата выдачи: {value('date_issue')}\n"
+        f"Кем выдан: {value('by_whom_issued')}\n"
+        f"Код подразделения: {value('department_code')}\n"
+        f"Дата рождения: {value('birth_date')}\n"
+        f"Адрес регистрации: {value('registration_address')}\n"
+        f"СНИЛС: {value('snils')}\n"
+        f"ИНН: {value('tin')}\n"
+        f"Телефон: {value('phone')}\n"
+        f"Email: {value('email')}\n\n"
+        f"Чек-лист: {checklist_text}\n"
+        f"Предупреждения: {warning_text}"
+    )
 
 
 def _name_signature(result: dict) -> tuple[str, str, str]:

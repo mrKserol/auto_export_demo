@@ -17,6 +17,7 @@ from app.services.document_intake_service import (
     DocumentIntakeService,
     IntakeConflictError,
     IntakeUpload,
+    build_intake_review_card,
 )
 
 
@@ -77,6 +78,10 @@ class FakeDocumentIntakeRepository:
         session["status"] = status
         session["updated_at"] = datetime.now(timezone.utc)
         return dict(session)
+
+    async def update_session_metadata(self, session_id, metadata):
+        self.sessions[session_id]["metadata"] = dict(metadata)
+        return dict(self.sessions[session_id])
 
     async def update_review_corrections(
         self,
@@ -441,6 +446,25 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_summary["effective_values"]["surname"], "Петров")
         self.assertEqual(second_summary["effective_values"]["phone"], "+79991112233")
         self.assertEqual(second_summary["effective_values"]["email"], "other@example.com")
+
+    def test_intake_review_card_uses_effective_values_and_safe_empty_text(self) -> None:
+        card = build_intake_review_card(
+            {
+                "effective_values": {
+                    "surname": "Иванов",
+                    "first_name": "Иван",
+                    "date_issue": "27.08.2012",
+                    "birth_place": None,
+                    "by_whom_issued": "МВД",
+                },
+                "checklist": {},
+                "warnings": [],
+            }
+        )
+        self.assertIn("ФИО: Иванов Иван не распознано", card)
+        self.assertIn("Место рождения: не распознано", card)
+        self.assertIn("Кем выдан: МВД", card)
+        self.assertIn("Дата выдачи: 27.08.2012", card)
 
     async def test_finish_incomplete_package_returns_not_ready(self) -> None:
         session_id = await self._session_id()

@@ -110,6 +110,20 @@ class DocumentIntakeRepository:
             )
             return _record_to_dict(row)
 
+    async def update_session_metadata(self, session_id: UUID, metadata: dict) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE document_intake_sessions
+                SET metadata = $2::jsonb, updated_at = NOW()
+                WHERE id = $1
+                RETURNING *;
+                """,
+                session_id,
+                json.dumps(metadata, ensure_ascii=False),
+            )
+            return _record_to_dict(row)
+
     async def update_review_corrections(
         self,
         *,

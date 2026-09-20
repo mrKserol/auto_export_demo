@@ -12,6 +12,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -60,6 +61,7 @@ from app.services.document_intake_service import (
     DocumentIntakeError,
     DocumentIntakeService,
     IntakeUpload,
+    build_intake_review_card,
 )
 from app.services.miniapp_link_service import (
     build_intake_review_miniapp_url,
@@ -129,6 +131,60 @@ def get_database(request: Request) -> Database:
 
 def get_bot(request: Request) -> Bot:
     return request.app.state.bot
+
+
+def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: int, chat_id: int) -> InlineKeyboardMarkup:
+    token = create_intake_review_token(
+        settings,
+        session_id=str(session_id),
+        telegram_user_id=user_id,
+        origin_chat_id=chat_id,
+    )
+    url = f"{build_intake_review_miniapp_url(settings, token)}&session_id={session_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=url))],
+            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.add_client:{session_id}")],
+        ]
+    )
+
+
+async def _notify_intake_review(
+    *,
+    request: Request,
+    session_id: UUID,
+    summary: dict,
+    settings: Settings,
+    intake_service: DocumentIntakeService,
+    user_id: int,
+    chat_id: int,
+) -> None:
+    bot = get_bot(request)
+    text = build_intake_review_card(summary)
+    keyboard = _intake_review_keyboard(settings, session_id=session_id, user_id=user_id, chat_id=chat_id)
+    session = await intake_service.get_review_session(session_id)
+    message_ref = (session.get("metadata") or {}).get("review_message") or {}
+    try:
+        if message_ref.get("chat_id") and message_ref.get("message_id"):
+            await bot.edit_message_text(
+                chat_id=int(message_ref["chat_id"]),
+                message_id=int(message_ref["message_id"]),
+                text=text,
+                reply_markup=keyboard,
+            )
+            return
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=keyboard,
+        )
+        await intake_service.set_review_message(
+            session_id,
+            chat_id=str(sent.chat.id),
+            message_id=str(sent.message_id),
+        )
+    except Exception:
+        logger.exception("Failed to update intake review message")
 
 
 def get_yandex_disk_client(request: Request) -> YandexDiskClient | None:
@@ -889,6 +945,7 @@ async def get_intake_review(
 async def patch_intake_review(
     session_id: UUID,
     payload: dict[str, Any],
+    request: Request,
     settings: Settings = Depends(get_settings),
     intake_service: DocumentIntakeService = Depends(get_document_intake_service),
 ) -> JSONResponse:
@@ -908,7 +965,23 @@ async def patch_intake_review(
         )
     except DocumentIntakeError as error:
         return _intake_error_response(error)
-    return JSONResponse(content={"ok": True, **result})
+    await _notify_intake_review(
+        request=request,
+        session_id=session_id,
+        summary=result,
+        settings=settings,
+        intake_service=intake_service,
+        user_id=context.telegram_user_id,
+        chat_id=context.origin_chat_id,
+    )
+    return JSONResponse(
+        content={
+            "ok": True,
+            **result,
+            "card_text": build_intake_review_card(result),
+            "notification": {"type": "intake.review.updated", "session_id": str(session_id)},
+        }
+    )
 
     try:
         context = verify_customer_edit_context_token(
