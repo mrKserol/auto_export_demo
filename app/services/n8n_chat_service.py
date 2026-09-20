@@ -87,9 +87,17 @@ class N8NChatService:
         event = build_telegram_command_event(message)
         if event is None:
             raise N8NChatError("unsupported Telegram command")
-        return await self.send_event(event)
+        return await self._post_event_and_extract(event)
 
     async def send_event(self, event: ChannelEvent) -> str:
+        body = await self._post_event(event)
+        return extract_n8n_assistant_text(body)
+
+    async def _post_event_and_extract(self, event: ChannelEvent):
+        body = await self._post_event(event)
+        return extract_n8n_reply(body)
+
+    async def _post_event(self, event: ChannelEvent) -> object:
         payload = event.to_dict()
         headers = {N8N_WEBHOOK_SECRET_HEADER: self._webhook_secret}
 
@@ -124,18 +132,23 @@ class N8NChatService:
                 raise N8NChatError("n8n webhook request failed") from exc
 
             try:
-                body = response.json()
+                return response.json()
             except ValueError as exc:
                 logger.error("n8n webhook returned invalid JSON")
                 raise N8NChatError("n8n webhook returned invalid JSON") from exc
-
-            return extract_n8n_assistant_text(body)
         finally:
             if close_client:
                 await client.aclose()
 
 
 def extract_n8n_assistant_text(payload: object) -> str:
+    reply = extract_n8n_reply(payload)
+    if reply.get("type") == "text":
+        return str(reply["text"])
+    raise N8NChatError("n8n webhook returned unsupported reply type")
+
+
+def extract_n8n_reply(payload: object) -> dict[str, str]:
     if not isinstance(payload, dict):
         raise N8NChatError("n8n webhook returned unexpected JSON")
 
@@ -144,7 +157,21 @@ def extract_n8n_assistant_text(payload: object) -> str:
         reply_type = reply.get("type")
         text = reply.get("text")
         if reply_type == "text" and isinstance(text, str) and text.strip():
-            return text.strip()
+            return {"type": "text", "text": text.strip()}
+        if (
+            reply_type == "web_app"
+            and isinstance(text, str)
+            and text.strip()
+            and isinstance(reply.get("button_text"), str)
+            and isinstance(reply.get("url"), str)
+            and reply["url"].startswith("https://")
+        ):
+            return {
+                "type": "web_app",
+                "text": text.strip(),
+                "button_text": reply["button_text"].strip(),
+                "url": reply["url"],
+            }
 
     result = payload.get("result")
     if not isinstance(result, dict):
@@ -166,7 +193,7 @@ def extract_n8n_assistant_text(payload: object) -> str:
     if not isinstance(text, str) or not text.strip():
         raise N8NChatError("n8n webhook response is missing assistant text")
 
-    return text.strip()
+    return {"type": "text", "text": text.strip()}
 
 
 def n8n_chat_configured(settings: Settings) -> bool:

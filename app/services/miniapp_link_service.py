@@ -9,6 +9,7 @@ from app.web.token_service import (
     create_specification_edit_context_token,
     create_customer_edit_context_token,
     create_customer_batch_context_token,
+    create_intake_review_context_token,
 )
 
 
@@ -112,6 +113,26 @@ def build_specification_edit_open_keyboard(url: str) -> InlineKeyboardMarkup:
 
 def build_customer_edit_miniapp_url(settings: Settings, token: str) -> str:
     return f"{settings.mini_app_base_url}/miniapp/customer?token={token}"
+
+
+def build_intake_review_miniapp_url(settings: Settings, token: str) -> str:
+    return f"{settings.mini_app_base_url}/miniapp/customer?token={token}&mode=intake"
+
+
+def create_intake_review_token(
+    settings: Settings,
+    *,
+    session_id: str,
+    telegram_user_id: int,
+    origin_chat_id: int,
+) -> str:
+    return create_intake_review_context_token(
+        secret=settings.mini_app_token_secret,
+        session_id=session_id,
+        telegram_user_id=telegram_user_id,
+        origin_chat_id=origin_chat_id,
+        ttl_seconds=settings.mini_app_token_ttl_seconds,
+    )
 
 
 def create_customer_edit_token(

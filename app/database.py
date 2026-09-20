@@ -166,7 +166,8 @@ CREATE TABLE IF NOT EXISTS document_intake_sessions (
     started_channel TEXT NOT NULL,
     started_external_user_id TEXT NOT NULL,
     started_conversation_id TEXT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    manual_corrections JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 """
 
@@ -195,6 +196,18 @@ CREATE TABLE IF NOT EXISTS document_intake_documents (
     warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+CREATE_DOCUMENT_INTAKE_REVIEW_AUDIT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS document_intake_review_audit (
+    id UUID PRIMARY KEY,
+    session_id UUID NOT NULL
+        REFERENCES document_intake_sessions(id)
+        ON DELETE CASCADE,
+    telegram_user_id TEXT NOT NULL,
+    changed_fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
 
@@ -467,6 +480,10 @@ CREATE_INDEXES_SQL = [
     ALTER TABLE document_intake_documents
     ADD COLUMN IF NOT EXISTS storage_status TEXT NOT NULL DEFAULT 'pending';
     """,
+    """
+    ALTER TABLE document_intake_sessions
+    ADD COLUMN IF NOT EXISTS manual_corrections JSONB NOT NULL DEFAULT '{}'::jsonb;
+    """,
     "DROP INDEX IF EXISTS uq_document_intake_provider_file;",
     "DROP INDEX IF EXISTS uq_document_intake_content;",
     """
@@ -568,6 +585,7 @@ class Database:
             await connection.execute(CREATE_CUSTOMER_UPLOAD_BATCH_FILES_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_INTAKE_SESSIONS_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_INTAKE_DOCUMENTS_TABLE_SQL)
+            await connection.execute(CREATE_DOCUMENT_INTAKE_REVIEW_AUDIT_TABLE_SQL)
             for statement in ENSURE_MINI_APP_LAUNCH_CODES_COLUMNS_SQL:
                 try:
                     await connection.execute(statement)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 
@@ -11,7 +11,13 @@ def _record_to_dict(record: asyncpg.Record | None) -> dict | None:
     if record is None:
         return None
     data = dict(record)
-    for key in ("metadata", "recognition_result", "warnings"):
+    for key in (
+        "metadata",
+        "recognition_result",
+        "warnings",
+        "manual_corrections",
+        "changed_fields",
+    ):
         value = data.get(key)
         if isinstance(value, str):
             data[key] = json.loads(value)
@@ -103,6 +109,39 @@ class DocumentIntakeRepository:
                 status,
             )
             return _record_to_dict(row)
+
+    async def update_review_corrections(
+        self,
+        *,
+        session_id: UUID,
+        corrections: dict,
+        telegram_user_id: int,
+        changed_fields: dict,
+    ) -> dict:
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    UPDATE document_intake_sessions
+                    SET manual_corrections = $2::jsonb, updated_at = NOW()
+                    WHERE id = $1;
+                    """,
+                    session_id,
+                    json.dumps(corrections, ensure_ascii=False),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO document_intake_review_audit
+                        (id, session_id, telegram_user_id, changed_fields)
+                    VALUES ($1, $2, $3, $4::jsonb);
+                    """,
+                    uuid4(),
+                    session_id,
+                    str(telegram_user_id),
+                    json.dumps(list(changed_fields), ensure_ascii=False),
+                )
+        session = await self.get_session(session_id)
+        return {} if session is None else dict(session.get("manual_corrections") or {})
 
     async def find_duplicate_document(
         self,

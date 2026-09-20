@@ -496,6 +496,25 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(_sent_text(self.bot_call), ASSISTANT_TEXT)
 
+    async def test_web_app_reply_creates_telegram_button(self) -> None:
+        reply = {
+            "type": "web_app",
+            "text": "Распознанные данные клиента",
+            "button_text": "✏️ Ручная коррекция",
+            "url": "https://api.ulkar.ru/miniapp/customer?token=signed",
+        }
+        with patch(
+            "app.handlers.n8n_chat.N8NChatService.send_telegram_command",
+            AsyncMock(return_value=reply),
+        ):
+            await self._feed(_message(text="/intake_finish"))
+
+        method = self.bot_call.await_args.args[0]
+        self.assertEqual(method.text, reply["text"])
+        button = method.reply_markup.inline_keyboard[0][0]
+        self.assertEqual(button.text, reply["button_text"])
+        self.assertEqual(button.web_app.url, reply["url"])
+
     async def test_slash_command_is_not_sent_to_n8n(self) -> None:
         send_telegram_text = AsyncMock(return_value=ASSISTANT_TEXT)
         with patch(

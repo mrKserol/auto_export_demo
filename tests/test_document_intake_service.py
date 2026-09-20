@@ -78,6 +78,21 @@ class FakeDocumentIntakeRepository:
         session["updated_at"] = datetime.now(timezone.utc)
         return dict(session)
 
+    async def update_review_corrections(
+        self,
+        *,
+        session_id,
+        corrections,
+        telegram_user_id,
+        changed_fields,
+    ):
+        self.sessions[session_id]["manual_corrections"] = dict(corrections)
+        self.sessions[session_id]["last_review_audit"] = {
+            "telegram_user_id": telegram_user_id,
+            "changed_fields": changed_fields,
+        }
+        return dict(corrections)
+
     async def find_duplicate_document(
         self,
         *,
@@ -325,6 +340,62 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(summary["documents"]), 2)
         self.assertIn("passport_main", summary["recognized_document_types"])
         self.assertIn("snils", summary["recognized_document_types"])
+
+    async def test_review_summary_aggregates_fields_and_detects_fio_mismatch(self) -> None:
+        session_id = await self._session_id()
+        self.recognition.recognize_document.side_effect = [
+            SimpleNamespace(
+                document_type="passport_main",
+                confidence=0.9,
+                extracted_fields={
+                    "last_name": "Иванов",
+                    "first_name": "Иван",
+                    "surname": "Иванович",
+                    "passport": "8000 000000",
+                },
+                warnings=[],
+            ),
+            SimpleNamespace(
+                document_type="snils",
+                confidence=0.8,
+                extracted_fields={
+                    "last_name": "Петров",
+                    "first_name": "Иван",
+                    "surname": "Иванович",
+                    "ipain": "123-456-789 00",
+                },
+                warnings=[],
+            ),
+        ]
+        await self.service.add_document(session_id, _upload(b"passport", provider_file_id="passport"))
+        await self.service.add_document(session_id, _upload(b"snils", provider_file_id="snils"))
+
+        summary = await self.service.get_review_summary(session_id)
+
+        self.assertEqual(summary["effective_values"]["passport"], "8000 000000")
+        self.assertEqual(summary["effective_values"]["snils"], "123-456-789 00")
+        self.assertIn("fio_mismatch_between_documents", summary["warnings"])
+        self.assertFalse(summary["checklist"]["tin"])
+
+    async def test_review_correction_overrides_effective_value_without_changing_ocr(self) -> None:
+        session_id = await self._session_id()
+        self.recognition.recognize_document.return_value = SimpleNamespace(
+            document_type="passport_main",
+            confidence=0.9,
+            extracted_fields={"last_name": "Иванов"},
+            warnings=[],
+        )
+        await self.service.add_document(session_id, _upload(b"passport", provider_file_id="passport"))
+
+        summary = await self.service.update_review_corrections(
+            session_id,
+            corrections={"surname": "Петров"},
+            telegram_user_id=42,
+        )
+
+        self.assertEqual(summary["ocr_values"]["surname"], "Иванов")
+        self.assertEqual(summary["effective_values"]["surname"], "Петров")
+        self.assertEqual(summary["corrections"], {"surname": "Петров"})
 
     async def test_finish_incomplete_package_returns_not_ready(self) -> None:
         session_id = await self._session_id()

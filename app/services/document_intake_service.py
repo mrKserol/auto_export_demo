@@ -25,6 +25,7 @@ SUPPORTED_INTAKE_CHANNELS = frozenset(
 
 INTAKE_STATUS_COLLECTING = "collecting"
 INTAKE_STATUS_REVIEW = "review"
+INTAKE_STATUS_CONFIRMED = "confirmed"
 INTAKE_STATUS_CANCELLED = "cancelled"
 INTAKE_STATUS_EXPIRED = "expired"
 ACTIVE_INTAKE_STATUSES = frozenset({INTAKE_STATUS_COLLECTING})
@@ -44,6 +45,19 @@ DEFAULT_REQUIRED_DOCUMENT_TYPES = (
     "snils",
 )
 DEFAULT_SESSION_TTL_MINUTES = 60
+REVIEW_FIELDS = (
+    "surname",
+    "first_name",
+    "patronymic",
+    "passport",
+    "date_issue",
+    "department_code",
+    "birth_date",
+    "birth_place",
+    "registration_address",
+    "snils",
+    "tin",
+)
 
 
 class DocumentIntakeError(Exception):
@@ -214,10 +228,57 @@ class DocumentIntakeService:
         session = await self._expire_if_needed(session) or session
         return await self._summary(session)
 
+    async def get_review_summary(self, session_id: UUID) -> dict:
+        session = await self._get_session_or_404(session_id)
+        session = await self._expire_if_needed(session) or session
+        return await self._review_summary(session)
+
+    async def validate_review_launch(
+        self,
+        session_id: UUID,
+        *,
+        channel: str,
+        external_user_id: str,
+        conversation_id: str,
+    ) -> dict:
+        session = await self._get_session_or_404(session_id)
+        session = await self._expire_if_needed(session) or session
+        if session["started_channel"] != channel or session["started_external_user_id"] != external_user_id or session["started_conversation_id"] != conversation_id:
+            raise IntakeConflictError("Intake session context mismatch")
+        if channel != CHANNEL_TELEGRAM:
+            raise IntakeValidationError("Web App launch is supported for Telegram only")
+        return session
+
+    async def update_review_corrections(
+        self,
+        session_id: UUID,
+        *,
+        corrections: dict,
+        telegram_user_id: int,
+    ) -> dict:
+        session = await self._get_session_or_404(session_id)
+        if session["status"] in {INTAKE_STATUS_CANCELLED, INTAKE_STATUS_EXPIRED}:
+            raise IntakeConflictError("Intake session is not editable")
+        normalized = {
+            key: value
+            for key, value in corrections.items()
+            if key in REVIEW_FIELDS and value is not None
+        }
+        current = dict(session.get("manual_corrections") or {})
+        current.update(normalized)
+        await self.repository.update_review_corrections(
+            session_id=session_id,
+            corrections=current,
+            telegram_user_id=telegram_user_id,
+            changed_fields=normalized,
+        )
+        refreshed = await self._get_session_or_404(session_id)
+        return await self._review_summary(refreshed)
+
     async def finish(self, session_id: UUID) -> dict:
         session = await self._get_session_or_404(session_id)
         session = await self._expire_if_needed(session) or session
-        summary = await self._summary(session)
+        summary = await self._review_summary(session)
         reasons = self._finish_reasons(summary)
         summary["ready_for_confirmation"] = not reasons
         summary["reasons"] = reasons
@@ -234,7 +295,7 @@ class DocumentIntakeService:
             INTAKE_STATUS_REVIEW,
         )
         assert session is not None
-        summary = await self._summary(session)
+        summary = await self._review_summary(session)
         summary["ready_for_confirmation"] = True
         summary["reasons"] = []
         return summary
@@ -262,6 +323,20 @@ class DocumentIntakeService:
         )
         assert session is not None
         return self._session_payload(session)
+
+    async def confirm(self, session_id: UUID) -> dict:
+        session = await self._get_session_or_404(session_id)
+        if session["status"] == INTAKE_STATUS_CONFIRMED:
+            return await self._review_summary(session)
+        summary = await self._review_summary(session)
+        if session["status"] != INTAKE_STATUS_REVIEW or self._finish_reasons(summary):
+            raise IntakeConflictError("Intake session is not ready for confirmation")
+        updated = await self.repository.update_session_status(
+            session_id,
+            INTAKE_STATUS_CONFIRMED,
+        )
+        assert updated is not None
+        return await self._review_summary(updated)
 
     async def _get_collecting_session(self, session_id: UUID) -> dict:
         session = await self._get_session_or_404(session_id)
@@ -332,6 +407,34 @@ class DocumentIntakeService:
             "warnings": warnings,
             "documents": [self._document_summary(document) for document in documents],
         }
+
+    async def _review_summary(self, session: dict) -> dict:
+        summary = await self._summary(session)
+        documents = await self.repository.list_documents(session["id"])
+        ocr_values = _aggregate_review_values(documents)
+        fio_warnings = ocr_values.pop("warnings", [])
+        summary["warnings"] = list(dict.fromkeys(summary["warnings"] + fio_warnings))
+        corrections = dict(session.get("manual_corrections") or {})
+        effective_values = {**ocr_values, **corrections}
+        summary.update(
+            {
+                "ocr_values": ocr_values,
+                "corrections": corrections,
+                "effective_values": effective_values,
+                "checklist": {
+                    document_type: document_type in summary["recognized_document_types"]
+                    and summary["storage_not_ready_count"] == 0
+                    for document_type in self.required_document_types
+                },
+            }
+        )
+        reasons = self._finish_reasons(summary)
+        summary["ready_for_confirmation"] = (
+            session["status"] in {INTAKE_STATUS_REVIEW, INTAKE_STATUS_CONFIRMED}
+            and not reasons
+        )
+        summary["reasons"] = reasons
+        return summary
 
     def _document_response(self, session: dict, document: dict, *, duplicate: bool) -> dict:
         return {
@@ -444,6 +547,44 @@ def _normalize_customer_document_result(result) -> dict:
         "confidence": getattr(result, "confidence", None),
         "warnings": warnings,
     }
+
+
+def _aggregate_review_values(documents: list[dict]) -> dict:
+    values = {field: None for field in REVIEW_FIELDS}
+    name_sources: dict[str, tuple[str, str, str]] = {}
+    for document in documents:
+        if document.get("status") != DOCUMENT_STATUS_RECOGNIZED:
+            continue
+        result = document.get("recognition_result") or {}
+        document_type = document.get("document_type") or result.get("document_type")
+        if document_type == "passport_main":
+            for field in (
+                "surname", "first_name", "patronymic", "passport",
+                "date_issue", "department_code", "birth_date", "birth_place",
+            ):
+                if result.get(field) and values[field] is None:
+                    values[field] = result[field]
+            name_sources["passport_main"] = _name_signature(result)
+        elif document_type == "passport_registration":
+            if result.get("registration_address") and values["registration_address"] is None:
+                values["registration_address"] = result["registration_address"]
+        elif document_type == "snils":
+            values["snils"] = values["snils"] or result.get("snils")
+            name_sources["snils"] = _name_signature(result)
+        elif document_type == "tin":
+            values["tin"] = values["tin"] or result.get("tin")
+            name_sources["tin"] = _name_signature(result)
+
+    signatures = {signature for signature in name_sources.values() if any(signature)}
+    values["warnings"] = ["fio_mismatch_between_documents"] if len(signatures) > 1 else []
+    return values
+
+
+def _name_signature(result: dict) -> tuple[str, str, str]:
+    return tuple(
+        str(result.get(field) or "").strip().casefold()
+        for field in ("surname", "first_name", "patronymic")
+    )
 
 
 def _unique_draft_filename(

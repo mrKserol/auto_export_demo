@@ -15,6 +15,7 @@ PURPOSE_CREATE_ESTIMATE = "create_estimate"
 PURPOSE_EDIT_SPECIFICATION = "edit_specification"
 PURPOSE_EDIT_CUSTOMER = "edit_customer"
 PURPOSE_CREATE_CUSTOMER_FROM_BATCH = "create_customer_from_batch"
+PURPOSE_INTAKE_REVIEW = "intake_review"
 
 
 class TokenError(Exception):
@@ -59,6 +60,28 @@ class BatchCustomerContextToken:
             "batch_id": self.batch_id,
             "telegram_user_id": self.telegram_user_id,
             "origin_chat_id": self.origin_chat_id,
+            "exp": self.exp,
+            "nonce": self.nonce,
+        }
+
+
+@dataclass(frozen=True)
+class IntakeReviewContextToken:
+    purpose: str
+    session_id: str
+    telegram_user_id: int
+    origin_chat_id: int
+    context_type: str
+    exp: int
+    nonce: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "purpose": self.purpose,
+            "session_id": self.session_id,
+            "telegram_user_id": self.telegram_user_id,
+            "origin_chat_id": self.origin_chat_id,
+            "context_type": self.context_type,
             "exp": self.exp,
             "nonce": self.nonce,
         }
@@ -178,6 +201,30 @@ def create_customer_batch_context_token(
         batch_id=int(batch_id),
         telegram_user_id=int(telegram_user_id),
         origin_chat_id=int(origin_chat_id),
+        exp=current_time + int(ttl_seconds),
+        nonce=secrets.token_urlsafe(16),
+    )
+    return _sign_payload(payload.to_payload(), secret)
+
+
+def create_intake_review_context_token(
+    *,
+    secret: str,
+    session_id: str,
+    telegram_user_id: int,
+    origin_chat_id: int,
+    ttl_seconds: int,
+    now: int | None = None,
+) -> str:
+    if ttl_seconds <= 0:
+        raise ValueError("ttl_seconds must be positive")
+    current_time = int(time.time() if now is None else now)
+    payload = IntakeReviewContextToken(
+        purpose=PURPOSE_INTAKE_REVIEW,
+        session_id=str(session_id),
+        telegram_user_id=int(telegram_user_id),
+        origin_chat_id=int(origin_chat_id),
+        context_type="intake_review",
         exp=current_time + int(ttl_seconds),
         nonce=secrets.token_urlsafe(16),
     )
@@ -308,6 +355,47 @@ def verify_customer_batch_context_token(
     ):
         raise TokenError("USER_MISMATCH", "Токен принадлежит другому пользователю")
 
+    return context
+
+
+def verify_intake_review_context_token(
+    token: str,
+    *,
+    secret: str,
+    expected_telegram_user_id: int | None = None,
+    now: int | None = None,
+) -> IntakeReviewContextToken:
+    if not token or "." not in token:
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Контекстный токен повреждён")
+    payload_part, signature_part = token.rsplit(".", 1)
+    try:
+        payload_bytes = _b64url_decode(payload_part)
+        provided_signature = _b64url_decode(signature_part)
+    except (ValueError, TypeError) as error:
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Контекстный токен повреждён") from error
+    expected_signature = _sign_bytes(payload_bytes, secret)
+    if not hmac.compare_digest(provided_signature, expected_signature):
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Подпись контекстного токена недействительна")
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+        context = IntakeReviewContextToken(
+            purpose=str(payload["purpose"]),
+            session_id=str(payload["session_id"]),
+            telegram_user_id=int(payload["telegram_user_id"]),
+            origin_chat_id=int(payload["origin_chat_id"]),
+            context_type=str(payload["context_type"]),
+            exp=int(payload["exp"]),
+            nonce=str(payload["nonce"]),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Контекстный токен повреждён") from error
+    if context.purpose != PURPOSE_INTAKE_REVIEW or context.context_type != "intake_review":
+        raise TokenError("INVALID_CONTEXT_TOKEN", "Неверное назначение токена")
+    current_time = int(time.time() if now is None else now)
+    if context.exp < current_time:
+        raise TokenError("EXPIRED_CONTEXT_TOKEN", "Срок действия контекстного токена истёк")
+    if expected_telegram_user_id is not None and int(expected_telegram_user_id) != context.telegram_user_id:
+        raise TokenError("USER_MISMATCH", "Токен принадлежит другому пользователю")
     return context
 
 

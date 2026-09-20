@@ -6,13 +6,41 @@ import unittest
 
 from app.web.token_service import (
     TokenError,
+    create_intake_review_context_token,
     create_specification_context_token,
+    verify_intake_review_context_token,
     verify_specification_context_token,
 )
 
 
 SECRET = "test-secret"
 NOW = 1_700_000_000
+
+
+class IntakeReviewContextTokenTests(unittest.TestCase):
+    def test_token_is_bound_to_user_and_session(self) -> None:
+        token = create_intake_review_context_token(
+            secret=SECRET,
+            session_id="11111111-1111-1111-1111-111111111111",
+            telegram_user_id=456,
+            origin_chat_id=456,
+            ttl_seconds=900,
+            now=NOW,
+        )
+        context = verify_intake_review_context_token(
+            token,
+            secret=SECRET,
+            expected_telegram_user_id=456,
+            now=NOW + 10,
+        )
+        self.assertEqual(context.session_id, "11111111-1111-1111-1111-111111111111")
+        with self.assertRaisesRegex(TokenError, "другому пользователю"):
+            verify_intake_review_context_token(
+                token,
+                secret=SECRET,
+                expected_telegram_user_id=999,
+                now=NOW + 10,
+            )
 
 
 class SpecificationContextTokenTests(unittest.TestCase):

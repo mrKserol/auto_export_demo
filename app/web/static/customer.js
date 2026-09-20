@@ -10,6 +10,7 @@
   const kitSummary = document.getElementById("kit-summary");
   let submitting = false;
   let formMode = "edit";
+  let intakeMode = new URLSearchParams(window.location.search).get("mode") === "intake";
   let batchId = null;
   let alreadySaved = false;
 
@@ -51,6 +52,22 @@
     Object.entries(vals || {}).forEach(([k,v])=>{
       const el = form.querySelector(`[name="${k}"]`);
       if(el && v !== null && v !== undefined) el.value = v;
+    });
+  }
+
+  function fillIntakeValues(values){
+    fillValues({
+      passport: values.passport,
+      last_name: values.surname,
+      first_name: values.first_name,
+      surname: values.patronymic,
+      date_issue: values.date_issue,
+      department_code: values.department_code,
+      birth_date: values.birth_date,
+      birth_place: values.birth_place,
+      registration_address: values.registration_address,
+      ipain: values.snils,
+      tin: values.tin,
     });
   }
 
@@ -201,6 +218,18 @@
     }
     setLoading(true);
     try{
+      if (intakeMode) {
+        const intakeSessionId = new URLSearchParams(window.location.search).get("session_id") || "";
+        const intakeUrl = "/api/intake-sessions/" + encodeURIComponent(intakeSessionId) + "/review?context_token=" + encodeURIComponent(token);
+        const res = await fetch(intakeUrl, { headers: { "X-Telegram-Init-Data": tg.initData || "" } });
+        const data = await res.json().catch(()=>({}));
+        if(!res.ok || !data.ok){ showError(data.error?.message || "Не удалось загрузить данные intake-сессии"); return; }
+        formMode = "intake";
+        fillIntakeValues(data.effective_values || {});
+        showWarnings(data.warnings || []);
+        if (tg && tg.MainButton) tg.MainButton.setText("Сохранить исправления");
+        return;
+      }
       const res = await fetch("/api/customers/edit-context", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ context_token: token, telegram_init_data: tg.initData || "" }) });
       const data = await res.json().catch(()=>({}));
       if(!res.ok || !data.ok){ showError(data.error?.message || "Не удалось загрузить данные клиента"); return; }
@@ -269,6 +298,24 @@
     const payload = collect();
     setLoading(true);
     try {
+      if (intakeMode) {
+        const corrections = {};
+        ["passport", "last_name", "first_name", "surname", "date_issue", "department_code", "birth_place", "registration_address", "ipain", "tin"].forEach((key) => {
+          const value = payload[key];
+          if (value !== undefined) corrections[key === "last_name" ? "surname" : key === "surname" ? "patronymic" : key === "ipain" ? "snils" : key] = value;
+        });
+        const res = await fetch("/api/intake-sessions/" + encodeURIComponent(new URLSearchParams(window.location.search).get("session_id") || "") + "/review", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ context_token: token, telegram_init_data: tg ? tg.initData || "" : "", corrections }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) { showError(data.error?.message || "Не удалось сохранить исправления"); return; }
+        fillIntakeValues(data.effective_values || {});
+        showWarnings(data.warnings || []);
+        showSuccess("Исправления сохранены");
+        return;
+      }
       const res = await fetch("/api/customers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {

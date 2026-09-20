@@ -1,0 +1,127 @@
+{
+  "name": "WF_router_FINAL",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram-router-final",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf-router-webhook",
+      "name": "Telegram Router Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "telegram-router-final"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.action}}",
+              "operation": "equals",
+              "value2": "intake.finish"
+            }
+          ]
+        }
+      },
+      "id": "route-intake-finish",
+      "name": "Route intake.finish",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_URL || 'https://api.ulkar.ru'}}/internal/n8n/intake-sessions/{{$json.payload.session_id || $json.metadata.session_id}}/finish",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-N8N-Webhook-Secret",
+              "value": "={{$env.N8N_WEBHOOK_SECRET}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "finish-intake-session",
+      "name": "Finish Intake Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 220]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_URL || 'https://api.ulkar.ru'}}/internal/n8n/intake-sessions/{{$('Telegram Router Webhook').item.json.payload.session_id || $('Telegram Router Webhook').item.json.metadata.session_id}}/review-launch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-N8N-Webhook-Secret",
+              "value": "={{$env.N8N_WEBHOOK_SECRET}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { channel: 'telegram', external_user_id: $('Telegram Router Webhook').item.json.metadata.user_id, conversation_id: $('Telegram Router Webhook').item.json.metadata.chat_id } }}",
+        "options": {}
+      },
+      "id": "launch-intake-review",
+      "name": "Review Launch Endpoint",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [980, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const finish = $('Finish Intake Session').item.json;\nconst launch = $('Review Launch Endpoint').item.json;\nconst summary = finish;\nconst fields = summary.effective_values || {};\nconst checklist = summary.checklist || {};\nconst labels = { passport_main: 'Паспорт', passport_registration: 'Регистрация', snils: 'СНИЛС', tin: 'ИНН' };\nconst fieldText = [\n  ['ФИО', [fields.surname, fields.first_name, fields.patronymic].filter(Boolean).join(' ')],\n  ['Паспорт', fields.passport],\n  ['Дата выдачи', fields.date_issue],\n  ['Код подразделения', fields.department_code],\n  ['Адрес регистрации', fields.registration_address],\n  ['СНИЛС', fields.snils],\n  ['ИНН', fields.tin]\n].map(([label, value]) => `${label}: ${value || 'не распознано'}`).join('\\n');\nconst checklistText = Object.entries(labels).map(([key, label]) => `${checklist[key] ? '✅' : '❌'} ${label}`).join('\\n');\nconst warnings = (summary.warnings || []).length ? `\\n\\nПредупреждения:\\n${summary.warnings.map(value => `• ${value}`).join('\\n')}` : '';\nreturn [{ json: { reply: { type: 'web_app', text: `Распознанные данные клиента\\n\\n${fieldText}\\n\\nЧек-лист:\\n${checklistText}${warnings}`, button_text: '✏️ Ручная коррекция', url: launch.launch_url } } }];"
+      },
+      "id": "format-intake-review-reply",
+      "name": "Format Intake Review Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1220, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {}
+      },
+      "id": "respond-router",
+      "name": "Respond to Telegram Router",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1460, 300]
+    }
+  ],
+  "connections": {
+    "Telegram Router Webhook": {
+      "main": [[{ "node": "Route intake.finish", "type": "main", "index": 0 }]]
+    },
+    "Route intake.finish": {
+      "main": [
+        [{ "node": "Finish Intake Session", "type": "main", "index": 0 }],
+        [{ "node": "Respond to Telegram Router", "type": "main", "index": 0 }]
+      ]
+    },
+    "Finish Intake Session": {
+      "main": [[{ "node": "Review Launch Endpoint", "type": "main", "index": 0 }]]
+    },
+    "Review Launch Endpoint": {
+      "main": [[{ "node": "Format Intake Review Reply", "type": "main", "index": 0 }]]
+    },
+    "Format Intake Review Reply": {
+      "main": [[{ "node": "Respond to Telegram Router", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {}
+}

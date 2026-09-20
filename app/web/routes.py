@@ -61,6 +61,12 @@ from app.services.document_intake_service import (
     DocumentIntakeService,
     IntakeUpload,
 )
+from app.services.miniapp_link_service import (
+    build_intake_review_miniapp_url,
+    create_intake_review_token,
+)
+from app.web.auth import TelegramUser
+from app.web.token_service import verify_intake_review_context_token
 from app.yadisk_client import YandexDiskClient
 
 logger = logging.getLogger(__name__)
@@ -78,6 +84,20 @@ class InternalIntakeSessionCreateRequest(BaseModel):
     external_user_id: str = Field(min_length=1)
     conversation_id: str = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class InternalIntakeReviewLaunchRequest(BaseModel):
+    channel: str = Field(min_length=1)
+    external_user_id: str = Field(min_length=1)
+    conversation_id: str = Field(min_length=1)
+
+
+class IntakeReviewCorrectionRequest(BaseModel):
+    corrections: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntakeConfirmRequest(BaseModel):
+    pass
 
 
 def error_response(
@@ -435,6 +455,64 @@ async def finish_internal_intake_session(
     return JSONResponse(content=result)
 
 
+@router.post("/internal/n8n/intake-sessions/{session_id}/review-launch")
+async def launch_internal_intake_review(
+    session_id: UUID,
+    payload: InternalIntakeReviewLaunchRequest,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(default=None, alias="X-N8N-Webhook-Secret"),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        await intake_service.validate_review_launch(
+            session_id,
+            channel=payload.channel,
+            external_user_id=payload.external_user_id,
+            conversation_id=payload.conversation_id,
+        )
+        telegram_user_id = int(payload.external_user_id)
+        origin_chat_id = int(payload.conversation_id)
+        token = create_intake_review_token(
+            settings,
+            session_id=str(session_id),
+            telegram_user_id=telegram_user_id,
+            origin_chat_id=origin_chat_id,
+        )
+    except (ValueError, DocumentIntakeError) as error:
+        if isinstance(error, DocumentIntakeError):
+            return _intake_error_response(error)
+        return error_response(422, "INTAKE_VALIDATION_ERROR", "Invalid Telegram context")
+    return JSONResponse(
+        content={
+            "ok": True,
+            "session_id": str(session_id),
+            "channel": "telegram",
+            "launch_url": f"{build_intake_review_miniapp_url(settings, token)}&session_id={session_id}",
+            "expires_in": settings.mini_app_token_ttl_seconds,
+        }
+    )
+
+
+@router.post("/internal/n8n/intake-sessions/{session_id}/confirm")
+async def confirm_internal_intake_session(
+    session_id: UUID,
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+    x_n8n_webhook_secret: str | None = Header(default=None, alias="X-N8N-Webhook-Secret"),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    try:
+        result = await intake_service.confirm(session_id)
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content=result)
+
+
 @router.post("/internal/n8n/intake-sessions/{session_id}/cancel")
 async def cancel_internal_intake_session(
     session_id: UUID,
@@ -759,7 +837,78 @@ async def get_customer_edit_context(
             "values": values,
             "message": "Клиент уже сохранён" if already_saved else None,
         }
-        return JSONResponse(status_code=200, content=content)
+    return JSONResponse(status_code=200, content=content)
+
+
+def _authenticate_intake_review(
+    payload: dict[str, Any],
+    settings: Settings,
+) -> tuple[Any | None, JSONResponse | None]:
+    token = str(payload.get("context_token") or "").strip()
+    init_data = str(payload.get("telegram_init_data") or "").strip()
+    try:
+        user = validate_telegram_init_data(
+            init_data,
+            settings.telegram_bot_token,
+            settings.telegram_init_data_max_age_seconds,
+        )
+        context = verify_intake_review_context_token(
+            token,
+            secret=settings.mini_app_token_secret,
+            expected_telegram_user_id=user.id,
+        )
+    except (InitDataError, TokenError) as error:
+        return None, error_response(401, getattr(error, "code", "UNAUTHORIZED"), str(error))
+    if user.id not in settings.miniapp_allowed_telegram_user_ids:
+        return None, error_response(403, "MINIAPP_FORBIDDEN", "Нет доступа к Mini App.")
+    return context, None
+
+
+@router.get("/api/intake-sessions/{session_id}/review")
+async def get_intake_review(
+    session_id: UUID,
+    context_token: str,
+    x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+) -> JSONResponse:
+    context, auth_error = _authenticate_intake_review(
+        {"context_token": context_token, "telegram_init_data": x_telegram_init_data}, settings
+    )
+    if auth_error is not None:
+        return auth_error
+    if context.session_id != str(session_id):
+        return error_response(403, "SESSION_MISMATCH", "Нет доступа к этой сессии.")
+    try:
+        return JSONResponse(content={"ok": True, **await intake_service.get_review_summary(session_id)})
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+
+
+@router.patch("/api/intake-sessions/{session_id}/review")
+async def patch_intake_review(
+    session_id: UUID,
+    payload: dict[str, Any],
+    settings: Settings = Depends(get_settings),
+    intake_service: DocumentIntakeService = Depends(get_document_intake_service),
+) -> JSONResponse:
+    context, auth_error = _authenticate_intake_review(payload, settings)
+    if auth_error is not None:
+        return auth_error
+    if context.session_id != str(session_id):
+        return error_response(403, "SESSION_MISMATCH", "Нет доступа к этой сессии.")
+    corrections = payload.get("corrections")
+    if not isinstance(corrections, dict):
+        return error_response(422, "VALIDATION_ERROR", "Некорректные corrections")
+    try:
+        result = await intake_service.update_review_corrections(
+            session_id,
+            corrections=corrections,
+            telegram_user_id=context.telegram_user_id,
+        )
+    except DocumentIntakeError as error:
+        return _intake_error_response(error)
+    return JSONResponse(content={"ok": True, **result})
 
     try:
         context = verify_customer_edit_context_token(

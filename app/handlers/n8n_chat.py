@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatType
 from aiogram.filters import Command, StateFilter
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 from app.config import Settings
 from app.repositories.customer_upload_batch_repository import (
@@ -52,7 +52,22 @@ async def handle_n8n_intake_command(message: Message, settings: Settings) -> Non
         await message.answer(N8N_UNAVAILABLE_USER_TEXT)
         return
 
-    await message.answer(reply)
+    if isinstance(reply, dict) and reply.get("type") == "web_app":
+        await message.answer(
+            reply["text"],
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=reply["button_text"],
+                            web_app=WebAppInfo(url=reply["url"]),
+                        )
+                    ]
+                ]
+            ),
+        )
+    else:
+        await message.answer(str(reply))
 
 
 @router.message(
