@@ -155,11 +155,16 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
             max_file_bytes=1024 * 1024,
         )
 
-    async def _session_id(self) -> UUID:
+    async def _session_id(
+        self,
+        *,
+        external_user_id: str = "316257868",
+        conversation_id: str = "316257868",
+    ) -> UUID:
         session = await self.service.create_or_get_session(
             channel="telegram",
-            external_user_id="316257868",
-            conversation_id="316257868",
+            external_user_id=external_user_id,
+            conversation_id=conversation_id,
             metadata={},
         )
         return UUID(session["session_id"])
@@ -262,6 +267,37 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(retry["duplicate"])
         self.assertEqual(retry["storage_path"], first_path)
+        self.assertEqual(self.disk.upload_bytes.await_count, 2)
+        self.assertEqual(self.recognition.recognize_document.await_count, 2)
+
+    async def test_same_file_in_new_session_is_not_duplicate(self) -> None:
+        first_session = await self._session_id()
+        second_session = await self._session_id(conversation_id="new-conversation")
+        self.recognition.recognize_document.return_value = SimpleNamespace(
+            document_type="passport_main",
+            confidence=0.9,
+            extracted_fields={},
+            warnings=[],
+        )
+
+        first = await self.service.add_document(
+            first_session,
+            _upload(b"same-file", provider_file_id="same-provider-file", original_name="data.jpg"),
+        )
+        duplicate = await self.service.add_document(
+            first_session,
+            _upload(b"same-file", provider_file_id="same-provider-file", original_name="data.jpg"),
+        )
+        second = await self.service.add_document(
+            second_session,
+            _upload(b"same-file", provider_file_id="same-provider-file", original_name="data.jpg"),
+        )
+
+        self.assertFalse(first["duplicate"])
+        self.assertTrue(duplicate["duplicate"])
+        self.assertFalse(second["duplicate"])
+        self.assertNotEqual(first["document_id"], second["document_id"])
+        self.assertNotEqual(first["storage_path"], second["storage_path"])
         self.assertEqual(self.disk.upload_bytes.await_count, 2)
         self.assertEqual(self.recognition.recognize_document.await_count, 2)
 
@@ -411,6 +447,12 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("provider_file_id", ddl)
         self.assertIn("external_user_id", ddl)
         self.assertIn("conversation_id", ddl)
+
+        indexes = "\n".join(database.CREATE_INDEXES_SQL)
+        self.assertIn("DROP INDEX IF EXISTS uq_document_intake_provider_file", indexes)
+        self.assertIn("DROP INDEX IF EXISTS uq_document_intake_content", indexes)
+        self.assertIn("ON document_intake_documents(session_id, provider_file_id)", indexes)
+        self.assertIn("ON document_intake_documents(session_id, content_sha256)", indexes)
 
 
 if __name__ == "__main__":

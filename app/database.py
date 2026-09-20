@@ -467,6 +467,8 @@ CREATE_INDEXES_SQL = [
     ALTER TABLE document_intake_documents
     ADD COLUMN IF NOT EXISTS storage_status TEXT NOT NULL DEFAULT 'pending';
     """,
+    "DROP INDEX IF EXISTS uq_document_intake_provider_file;",
+    "DROP INDEX IF EXISTS uq_document_intake_content;",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS uq_document_intake_provider_file
     ON document_intake_documents(session_id, provider_file_id)
