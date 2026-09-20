@@ -145,7 +145,7 @@ async def handle_intake_add_client_callback(
     F.chat.type == ChatType.PRIVATE,
     Command(*INTAKE_COMMANDS),
 )
-async def handle_n8n_intake_command(message: Message, settings: Settings) -> None:
+async def handle_n8n_intake_command(message: Message, settings: Settings, intake_service: DocumentIntakeService | None = None) -> None:
     if not n8n_chat_configured(settings):
         return
 
@@ -175,7 +175,17 @@ async def handle_n8n_intake_command(message: Message, settings: Settings) -> Non
                     channel="telegram",
                 )
                 keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=f"intake.action:{action_token}")])
-        await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        sent = await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        # The first card is the anchor PATCH later edits. Keep only neutral ref data.
+        if reply.get("session_id") and intake_service is not None:
+            try:
+                from uuid import UUID
+                await intake_service.set_review_card_ref(
+                    UUID(reply["session_id"]), channel="telegram",
+                    conversation_id=str(sent.chat.id), message_id=str(sent.message_id),
+                )
+            except Exception:
+                logger.exception("Failed to persist intake review card reference")
         return
     if isinstance(reply, dict) and reply.get("type") == "web_app":
         await message.answer(

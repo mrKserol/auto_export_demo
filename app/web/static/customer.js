@@ -335,6 +335,11 @@
         fillIntakeValues(data.effective_values || {});
         showWarnings(data.warnings || []);
         showSuccess("Исправления сохранены");
+        // Intake review is complete only after the backend accepted the PATCH
+        // and queued/finished the Telegram card update.
+        if (isTelegram && tg && typeof tg.close === "function") {
+          setTimeout(() => { try { tg.close(); } catch (_) {} }, 250);
+        }
         return;
       }
       const res = await fetch("/api/customers", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });

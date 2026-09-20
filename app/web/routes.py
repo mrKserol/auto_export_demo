@@ -176,12 +176,11 @@ async def _notify_intake_review(
     try:
         adapter = TelegramAdapter(bot)
         if card_ref is not None and card_ref.conversation_id:
-            await adapter.edit_card(
-                ref=card_ref,
-                text=text,
-                keyboard=keyboard,
-            )
-            return
+            try:
+                await adapter.edit_card(ref=card_ref, text=text, keyboard=keyboard)
+                return
+            except Exception:
+                logger.warning("Failed to edit intake review card; sending replacement")
         ref = await adapter.send_card(
             conversation_id=str(chat_id),
             text=text,
