@@ -64,6 +64,7 @@ from app.services.document_intake_service import (
     build_intake_review_card,
 )
 from app.services.channel_action_token import create_channel_action_token
+from app.services.compact_action_token import create_compact_action_token, telegram_callback_data
 from app.services.channel_adapter import TelegramAdapter, review_card_ref_from_metadata
 from app.services.miniapp_link_service import (
     build_intake_review_miniapp_url,
@@ -143,16 +144,14 @@ def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: in
         origin_chat_id=chat_id,
     )
     url = f"{build_intake_review_miniapp_url(settings, token)}&session_id={session_id}"
-    action_token = create_channel_action_token(
-        secret=settings.mini_app_token_secret,
-        action="intake.add_client",
-        session_id=str(session_id),
-        channel="telegram",
+    action_token = create_compact_action_token(
+        action="intake.add_client", session_id=session_id, channel="telegram",
+        external_user_id=str(user_id), conversation_id=str(chat_id),
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=url))],
-            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.action:{action_token}")],
+            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=telegram_callback_data(action_token))],
         ]
     )
 

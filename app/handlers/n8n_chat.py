@@ -5,6 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from uuid import UUID
 
@@ -25,6 +26,11 @@ from app.services.channel_action_token import verify_channel_action_token
 from app.services.channel_action_token import create_channel_action_token
 from app.services.intake_customer_service import IntakeCustomerService
 from app.services.miniapp_link_service import create_intake_review_token
+from app.services.compact_action_token import (
+    consume_compact_action_token,
+    create_compact_action_token,
+    telegram_callback_data,
+)
 
 router = Router(name="n8n_chat")
 logger = logging.getLogger(__name__)
@@ -39,7 +45,7 @@ SUPPORTED_DOCUMENT_MIME_TYPES = {"application/pdf"}
 INTAKE_COMMANDS = ("intake_start", "intake_finish", "intake_cancel")
 
 
-@router.callback_query(F.data.startswith("intake.action:") | F.data.startswith("intake.add_client:"))
+@router.callback_query(F.data.startswith("a:") | F.data.startswith("intake.action:") | F.data.startswith("intake.add_client:"))
 async def handle_intake_add_client_callback(
     callback: CallbackQuery,
     settings: Settings,
@@ -48,7 +54,17 @@ async def handle_intake_add_client_callback(
 ) -> None:
     callback_data = callback.data or ""
     try:
-        if callback_data.startswith("intake.action:"):
+        if callback_data.startswith("a:"):
+            if callback.from_user is None or callback.message is None:
+                raise ValueError
+            record = consume_compact_action_token(
+                callback_data[2:], action=None, channel="telegram",
+                external_user_id=str(callback.from_user.id),
+                conversation_id=str(callback.message.chat.id),
+            )
+            session_id = record.session_id
+            action = record
+        elif callback_data.startswith("intake.action:"):
             action = verify_channel_action_token(
                 callback_data.split(":", 1)[1],
                 secret=settings.mini_app_token_secret,
@@ -76,27 +92,33 @@ async def handle_intake_add_client_callback(
         await callback.answer("Проверяю клиента по паспорту…")
         return
     try:
-        if callback_data.startswith("intake.action:") and action.action == "intake.replace_client":
+        if callback_data.startswith("a:") and action.action == "intake.add_client":
+            result = await intake_customer_service.add_client(
+                session_id=session_id, channel="telegram",
+                external_user_id=str(callback.from_user.id),
+                conversation_id=str(callback.message.chat.id),
+            )
+        elif (callback_data.startswith("a:") or callback_data.startswith("intake.action:")) and action.action == "intake.replace_client":
             result = await intake_customer_service.replace_client(
                 session_id=session_id, customer_id=int(action.customer_id),
                 channel="telegram", external_user_id=str(callback.from_user.id),
                 conversation_id=str(callback.message.chat.id),
             )
-        elif callback_data.startswith("intake.action:") and action.action == "intake.cancel":
+        elif (callback_data.startswith("a:") or callback_data.startswith("intake.action:")) and action.action == "intake.cancel":
             summary = await intake_service.get_review_summary(session_id)
             review_token = create_intake_review_token(
                 settings, session_id=str(session_id), telegram_user_id=callback.from_user.id,
                 origin_chat_id=callback.message.chat.id,
             )
-            add_token = create_channel_action_token(
-                secret=settings.mini_app_token_secret, action="intake.add_client",
-                session_id=str(session_id), channel="telegram",
+            add_token = create_compact_action_token(
+                action="intake.add_client", session_id=session_id, channel="telegram",
+                external_user_id=str(callback.from_user.id), conversation_id=str(callback.message.chat.id),
             )
             await callback.message.edit_text(
                 intake_service.build_intake_review_card(summary),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=f"{settings.mini_app_base_url}/miniapp/customer?token={review_token}"))],
-                    [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.action:{add_token}")],
+                    [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=telegram_callback_data(add_token))],
                 ]),
             )
             await callback.answer("Отменено")
@@ -116,13 +138,20 @@ async def handle_intake_add_client_callback(
         await callback.message.edit_text(result.message or "Заполните номер паспорта в ручной коррекции")
     elif result.status == "duplicate":
         secret = settings.mini_app_token_secret
-        replace_token = create_channel_action_token(secret=secret, action="intake.replace_client", session_id=str(session_id), channel="telegram", customer_id=str(result.customer["id"]))
-        cancel_token = create_channel_action_token(secret=secret, action="intake.cancel", session_id=str(session_id), channel="telegram")
+        replace_token = telegram_callback_data(create_compact_action_token(
+            action="intake.replace_client", session_id=session_id, channel="telegram",
+            external_user_id=str(callback.from_user.id), conversation_id=str(callback.message.chat.id),
+            customer_id=str(result.customer["id"]),
+        ))
+        cancel_token = telegram_callback_data(create_compact_action_token(
+            action="intake.cancel", session_id=session_id, channel="telegram",
+            external_user_id=str(callback.from_user.id), conversation_id=str(callback.message.chat.id),
+        ))
         await callback.message.edit_text(
             result.message or "Клиент с таким паспортом уже существует.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Заменить", callback_data=f"intake.action:{replace_token}")],
-                [InlineKeyboardButton(text="Отмена", callback_data=f"intake.action:{cancel_token}")],
+                [InlineKeyboardButton(text="Заменить", callback_data=replace_token)],
+                [InlineKeyboardButton(text="Отмена", callback_data=cancel_token)],
             ]),
         )
     elif result.status in {"completed", "replaced"}:
@@ -168,14 +197,19 @@ async def handle_n8n_intake_command(message: Message, settings: Settings, intake
             if button.get("type") == "web_app" and isinstance(button.get("url"), str):
                 keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), web_app=WebAppInfo(url=button["url"]))])
             elif button.get("type") == "callback":
-                action_token = create_channel_action_token(
-                    secret=settings.mini_app_token_secret,
+                action_token = create_compact_action_token(
                     action=str(button.get("action") or "intake.add_client"),
-                    session_id=reply["session_id"],
-                    channel="telegram",
+                    session_id=reply["session_id"], channel="telegram",
+                    external_user_id=str(message.from_user.id if message.from_user else ""),
+                    conversation_id=str(message.chat.id),
                 )
-                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=f"intake.action:{action_token}")])
-        sent = await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=telegram_callback_data(action_token))])
+        try:
+            sent = await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
+        except TelegramBadRequest:
+            logger.warning("Telegram rejected intake keyboard (callback data validation)")
+            await message.answer("Не удалось показать кнопки intake. Попробуйте ещё раз.")
+            return
         # The first card is the anchor PATCH later edits. Keep only neutral ref data.
         if reply.get("session_id") and intake_service is not None:
             try:
