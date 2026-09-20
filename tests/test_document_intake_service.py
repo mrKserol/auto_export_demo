@@ -352,6 +352,8 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
                     "first_name": "Иван",
                     "surname": "Иванович",
                     "passport": "8000 000000",
+                    "date_issue": "27.08.2012",
+                    "birth_place": "г. Екатеринбург",
                 },
                 warnings=[],
             ),
@@ -373,7 +375,11 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         summary = await self.service.get_review_summary(session_id)
 
         self.assertEqual(summary["effective_values"]["passport"], "8000 000000")
+        self.assertEqual(summary["effective_values"]["date_issue"], "27.08.2012")
+        self.assertEqual(summary["effective_values"]["birth_place"], "г. Екатеринбург")
         self.assertEqual(summary["effective_values"]["snils"], "123-456-789 00")
+        self.assertIsNone(summary["effective_values"]["registration_address"])
+        self.assertIsNone(summary["effective_values"]["last_name_translit"])
         self.assertIn("fio_mismatch_between_documents", summary["warnings"])
         self.assertFalse(summary["checklist"]["tin"])
 

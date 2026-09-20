@@ -56,19 +56,38 @@
   }
 
   function fillIntakeValues(values){
+    const intakeFields = ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin"];
+    intakeFields.forEach((key) => {
+      const el = form.querySelector(`[name="${key}"]`);
+      if (el) el.value = "";
+    });
+    document.querySelectorAll(".intake-only-field").forEach((el) => { el.hidden = false; });
+    const issueDate = values.date_issue ? normalizeDateForInput(values.date_issue) : "";
+    const birthDate = values.birth_date ? normalizeDateForInput(values.birth_date) : "";
     fillValues({
       passport: values.passport,
       last_name: values.surname,
       first_name: values.first_name,
       surname: values.patronymic,
-      date_issue: values.date_issue,
+      last_name_translit: values.last_name_translit,
+      first_name_translit: values.first_name_translit,
+      surname_translit: values.surname_translit,
+      date_issue: issueDate,
+      by_whom_issued: values.by_whom_issued,
       department_code: values.department_code,
-      birth_date: values.birth_date,
+      birth_date: birthDate,
       birth_place: values.birth_place,
       registration_address: values.registration_address,
       ipain: values.snils,
       tin: values.tin,
     });
+  }
+
+  function normalizeDateForInput(value){
+    const raw = String(value || "").trim();
+    if(/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const match = raw.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
   }
 
   function renderKit(kit){
@@ -300,7 +319,7 @@
     try {
       if (intakeMode) {
         const corrections = {};
-        ["passport", "last_name", "first_name", "surname", "date_issue", "department_code", "birth_place", "registration_address", "ipain", "tin"].forEach((key) => {
+        ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin"].forEach((key) => {
           const value = payload[key];
           if (value !== undefined) corrections[key === "last_name" ? "surname" : key === "surname" ? "patronymic" : key === "ipain" ? "snils" : key] = value;
         });

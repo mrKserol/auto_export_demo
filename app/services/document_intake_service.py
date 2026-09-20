@@ -55,6 +55,10 @@ REVIEW_FIELDS = (
     "birth_date",
     "birth_place",
     "registration_address",
+    "by_whom_issued",
+    "last_name_translit",
+    "first_name_translit",
+    "surname_translit",
     "snils",
     "tin",
 )
@@ -540,6 +544,10 @@ def _normalize_customer_document_result(result) -> dict:
         "birth_date": fields.get("birth_date"),
         "birth_place": fields.get("birth_place"),
         "registration_address": fields.get("registration_address"),
+        "by_whom_issued": fields.get("by_whom_issued"),
+        "last_name_translit": fields.get("last_name_translit"),
+        "first_name_translit": fields.get("first_name_translit"),
+        "surname_translit": fields.get("surname_translit"),
         "snils": fields.get("snils") or fields.get("ipain"),
         "tin": fields.get("tin"),
         "document_type": getattr(result, "document_type", None)
@@ -561,6 +569,8 @@ def _aggregate_review_values(documents: list[dict]) -> dict:
             for field in (
                 "surname", "first_name", "patronymic", "passport",
                 "date_issue", "department_code", "birth_date", "birth_place",
+                "by_whom_issued", "last_name_translit", "first_name_translit",
+                "surname_translit",
             ):
                 if result.get(field) and values[field] is None:
                     values[field] = result[field]
