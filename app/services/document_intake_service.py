@@ -138,7 +138,9 @@ class DocumentIntakeService:
             if duplicate.get("storage_status") != STORAGE_STATUS_STORED:
                 storage_path, storage_status = await self._store_draft_file(
                     session_id,
-                    upload,
+                    document_id=duplicate["id"],
+                    content_sha256=content_sha256,
+                    upload=upload,
                 )
                 if storage_status == STORAGE_STATUS_STORED:
                     updated = await self.repository.update_document_storage(
@@ -154,7 +156,13 @@ class DocumentIntakeService:
                 duplicate=True,
             )
 
-        storage_path, storage_status = await self._store_draft_file(session_id, upload)
+        document_id = uuid4()
+        storage_path, storage_status = await self._store_draft_file(
+            session_id,
+            document_id=document_id,
+            content_sha256=content_sha256,
+            upload=upload,
+        )
         status = DOCUMENT_STATUS_RECOGNIZED
         recognition_payload: dict | None = None
         document_type = None
@@ -179,7 +187,7 @@ class DocumentIntakeService:
             warnings = ["recognition_failed"]
 
         document = await self.repository.create_document(
-            id=uuid4(),
+            id=document_id,
             session_id=session_id,
             status=status,
             channel=upload.channel,
@@ -369,11 +377,19 @@ class DocumentIntakeService:
     async def _store_draft_file(
         self,
         session_id: UUID,
+        *,
+        document_id: UUID,
+        content_sha256: str,
         upload: IntakeUpload,
     ) -> tuple[str | None, str]:
         if self.yandex_disk_client is None:
             return None, STORAGE_STATUS_PENDING
-        name = _safe_filename(upload.original_name or "document.bin")
+        name = _unique_draft_filename(
+            document_id=document_id,
+            content_sha256=content_sha256,
+            original_name=upload.original_name,
+            mime_type=upload.mime_type,
+        )
         path = (
             f"{self.yandex_disk_client.base_path}/02_Клиенты/"
             f"00_Черновики/{session_id}/{name}"
@@ -430,6 +446,41 @@ def _normalize_customer_document_result(result) -> dict:
     }
 
 
-def _safe_filename(name: str) -> str:
+def _unique_draft_filename(
+    *,
+    document_id: UUID,
+    content_sha256: str,
+    original_name: str | None,
+    mime_type: str | None,
+) -> str:
+    safe_name = _safe_filename(original_name or "document", mime_type=mime_type)
+    return f"{document_id}_{content_sha256[:12]}_{safe_name}"
+
+
+def _safe_filename(name: str, *, mime_type: str | None) -> str:
     cleaned = re.sub(r"[^A-Za-zА-Яа-я0-9._-]+", "_", name).strip("._")
-    return cleaned or "document.bin"
+    cleaned = cleaned or "document"
+    stem, extension = _split_filename(cleaned)
+    expected_extension = _extension_for_mime(mime_type)
+    if expected_extension is not None:
+        extension = expected_extension
+    elif not extension:
+        extension = ".bin"
+    return f"{stem}{extension}"
+
+
+def _split_filename(name: str) -> tuple[str, str]:
+    stem, extension = name.rsplit(".", 1) if "." in name else (name, "")
+    if not stem:
+        stem = "document"
+    return stem, f".{extension.lower()}" if extension else ""
+
+
+def _extension_for_mime(mime_type: str | None) -> str | None:
+    return {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/tiff": ".tiff",
+    }.get((mime_type or "").lower())

@@ -230,6 +230,41 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.repository.documents[session_id]), 1)
         self.recognition.recognize_document.assert_awaited_once()
 
+    async def test_draft_paths_are_unique_and_retry_reuses_the_same_path(self) -> None:
+        session_id = await self._session_id()
+        self.recognition.recognize_document.side_effect = [
+            SimpleNamespace(document_type="passport_main", confidence=0.9, extracted_fields={}, warnings=[]),
+            SimpleNamespace(document_type="passport_registration", confidence=0.9, extracted_fields={}, warnings=[]),
+        ]
+
+        first = await self.service.add_document(
+            session_id,
+            _upload(b"first", provider_file_id="file-1", original_name="data.jpg"),
+        )
+        second = await self.service.add_document(
+            session_id,
+            _upload(b"second", provider_file_id="file-2", original_name="data.jpg"),
+        )
+
+        first_path = first["storage_path"]
+        second_path = second["storage_path"]
+        self.assertNotEqual(first_path, second_path)
+        self.assertIn(first["document_id"], first_path)
+        self.assertIn(second["document_id"], second_path)
+        self.assertIn("a7937b64b8ca", first_path)
+        self.assertIn("16367aacb67a", second_path)
+        self.assertEqual(first_path.rsplit("/", 1)[0], second_path.rsplit("/", 1)[0])
+
+        retry = await self.service.add_document(
+            session_id,
+            _upload(b"first", provider_file_id="file-1", original_name="data.jpg"),
+        )
+
+        self.assertTrue(retry["duplicate"])
+        self.assertEqual(retry["storage_path"], first_path)
+        self.assertEqual(self.disk.upload_bytes.await_count, 2)
+        self.assertEqual(self.recognition.recognize_document.await_count, 2)
+
     async def test_multiple_documents_share_one_intake_session(self) -> None:
         session_id = await self._session_id()
         self.recognition.recognize_document.side_effect = [
