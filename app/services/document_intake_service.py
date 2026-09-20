@@ -263,12 +263,8 @@ class DocumentIntakeService:
         session = await self._get_session_or_404(session_id)
         if session["status"] in {INTAKE_STATUS_CANCELLED, INTAKE_STATUS_EXPIRED}:
             raise IntakeConflictError("Intake session is not editable")
-        normalized = {
-            key: value
-            for key, value in corrections.items()
-            if key in REVIEW_FIELDS and value is not None
-        }
-        current = dict(session.get("manual_corrections") or {})
+        normalized = _clean_manual_corrections(corrections)
+        current = _clean_manual_corrections(session.get("manual_corrections") or {})
         current.update(normalized)
         await self.repository.update_review_corrections(
             session_id=session_id,
@@ -418,7 +414,7 @@ class DocumentIntakeService:
         ocr_values = _aggregate_review_values(documents)
         fio_warnings = ocr_values.pop("warnings", [])
         summary["warnings"] = list(dict.fromkeys(summary["warnings"] + fio_warnings))
-        corrections = dict(session.get("manual_corrections") or {})
+        corrections = _clean_manual_corrections(session.get("manual_corrections") or {})
         effective_values = {**ocr_values, **corrections}
         summary.update(
             {
@@ -588,6 +584,19 @@ def _aggregate_review_values(documents: list[dict]) -> dict:
     signatures = {signature for signature in name_sources.values() if any(signature)}
     values["warnings"] = ["fio_mismatch_between_documents"] if len(signatures) > 1 else []
     return values
+
+
+def _clean_manual_corrections(corrections: dict) -> dict:
+    cleaned: dict[str, str] = {}
+    for key, value in corrections.items():
+        if key not in REVIEW_FIELDS or value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        cleaned[key] = value
+    return cleaned
 
 
 def _name_signature(result: dict) -> tuple[str, str, str]:

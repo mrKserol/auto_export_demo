@@ -403,6 +403,30 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["effective_values"]["surname"], "Петров")
         self.assertEqual(summary["corrections"], {"surname": "Петров"})
 
+    async def test_review_corrections_are_scoped_to_the_current_session(self) -> None:
+        first_session = await self._session_id()
+        second_session = await self._session_id(conversation_id="another-chat")
+        self.recognition.recognize_document.return_value = SimpleNamespace(
+            document_type="passport_main",
+            confidence=0.9,
+            extracted_fields={"last_name": "Иванов"},
+            warnings=[],
+        )
+        await self.service.add_document(first_session, _upload(b"first", provider_file_id="first"))
+        await self.service.add_document(second_session, _upload(b"second", provider_file_id="second"))
+
+        await self.service.update_review_corrections(
+            second_session,
+            corrections={"surname": "Петров"},
+            telegram_user_id=42,
+        )
+
+        first_summary = await self.service.get_review_summary(first_session)
+        second_summary = await self.service.get_review_summary(second_session)
+        self.assertIsNone(first_summary["corrections"].get("surname"))
+        self.assertEqual(first_summary["effective_values"]["surname"], "Иванов")
+        self.assertEqual(second_summary["effective_values"]["surname"], "Петров")
+
     async def test_finish_incomplete_package_returns_not_ready(self) -> None:
         session_id = await self._session_id()
         summary = await self.service.finish(session_id)
