@@ -909,6 +909,47 @@ async def get_customer_edit_context(
             "values": values,
             "message": "Клиент уже сохранён" if already_saved else None,
         }
+    else:
+        try:
+            customer_context = verify_customer_edit_context_token(
+                form.context_token,
+                secret=settings.mini_app_token_secret,
+                expected_telegram_user_id=telegram_user.id,
+            )
+        except TokenError as error:
+            return error_response(401, error.code, error.message)
+
+        customer = await database.get_customer_by_id(int(customer_context.customer_id))
+        if not customer:
+            return error_response(404, "CUSTOMER_NOT_FOUND", "Клиент не найден")
+
+        def legacy_date(value):
+            return None if value is None else (
+                value.isoformat() if hasattr(value, "isoformat") else str(value)
+            )
+
+        content = {
+            "ok": True,
+            "mode": "edit",
+            "customer_id": customer_context.customer_id,
+            "values": {
+                "passport": customer.get("passport"),
+                "last_name": customer.get("last_name"),
+                "first_name": customer.get("first_name"),
+                "surname": customer.get("surname"),
+                "last_name_translit": customer.get("last_name_translit"),
+                "first_name_translit": customer.get("first_name_translit"),
+                "surname_translit": customer.get("surname_translit"),
+                "date_issue": legacy_date(customer.get("date_issue")),
+                "by_whom_issued": customer.get("by_whom_issued"),
+                "department_code": customer.get("department_code"),
+                "registration_address": customer.get("registration_address"),
+                "ipain": customer.get("ipain"),
+                "tin": customer.get("tin"),
+                "phone": customer.get("phone"),
+                "email": customer.get("email"),
+            },
+        }
     return JSONResponse(status_code=200, content=content)
 
 
