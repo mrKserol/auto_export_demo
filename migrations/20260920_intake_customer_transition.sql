@@ -10,3 +10,6 @@ ALTER TABLE document_intake_review_audit
 
 ALTER TABLE document_intake_review_audit
     ADD COLUMN IF NOT EXISTS actor_external_user_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_customers_passport_normalized
+    ON customers ((regexp_replace(upper(passport), '[[:space:]-]', '', 'g')));

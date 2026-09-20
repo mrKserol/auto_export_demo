@@ -82,6 +82,8 @@ async def handle_intake_add_client_callback(
                 conversation_id=str(callback.message.chat.id),
             )
         elif callback_data.startswith("intake.action:") and action.action == "intake.cancel":
+            summary = await intake_service.get_review_summary(session_id)
+            await callback.message.edit_text(intake_service.build_intake_review_card(summary))
             await callback.answer("Отменено")
             return
         else:
@@ -108,14 +110,18 @@ async def handle_intake_add_client_callback(
                 [InlineKeyboardButton(text="Отмена", callback_data=f"intake.action:{cancel_token}")],
             ]),
         )
-    elif result.status == "completed":
+    elif result.status in {"completed", "replaced"}:
         customer = result.customer or {}
         await callback.message.edit_text(
-            "КЛИЕНТ ДОБАВЛЕН\n\n"
+            ("ДАННЫЕ КЛИЕНТА ОБНОВЛЕНЫ" if result.status == "replaced" else "КЛИЕНТ ДОБАВЛЕН") + "\n\n"
             f"ФИО: {customer.get('surname') or 'не распознано'} {customer.get('first_name') or ''}\n"
             f"Паспорт: {customer.get('passport') or 'не распознано'}\n"
             f"Телефон: {customer.get('phone') or 'не распознано'}\n"
-            f"Email: {customer.get('email') or 'не распознано'}"
+            f"Email: {customer.get('email') or 'не распознано'}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Редактировать клиента", callback_data=f"customer_edit:{customer['id']}")],
+                [InlineKeyboardButton(text="📝 Добавить спецификацию", callback_data=f"customer_edit_spec:{customer['id']}")],
+            ]),
         )
 
 

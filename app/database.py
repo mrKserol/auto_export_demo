@@ -515,6 +515,10 @@ CREATE_INDEXES_SQL = [
     CREATE UNIQUE INDEX IF NOT EXISTS uq_document_intake_content
     ON document_intake_documents(session_id, content_sha256);
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_customers_passport_normalized
+    ON customers ((regexp_replace(upper(passport), '[[:space:]-]', '', 'g')));
+    """,
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -1041,6 +1045,24 @@ class Database:
                    FOR UPDATE;""", passport,
             )
             return _record_to_dict(row) if row else None
+
+    async def create_customer_with_passport_lock(self, passport: str, data: dict) -> tuple[dict, bool]:
+        """Serialize intake creation by normalized passport across workers."""
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("SELECT pg_advisory_xact_lock(hashtext($1));", passport)
+                row = await connection.fetchrow(
+                    """SELECT * FROM customers
+                       WHERE regexp_replace(upper(passport), '[[:space:]-]', '', 'g') = $1
+                       LIMIT 1;""", passport,
+                )
+                if row is not None:
+                    return _record_to_dict(row), True  # type: ignore[return-value]
+                # Keep the canonical INSERT implementation in one place.
+                customer = await self.create_customer(data)
+                return customer, False
 
     async def get_customer_by_id(self, customer_id: int) -> dict | None:
         if self._pool is None:

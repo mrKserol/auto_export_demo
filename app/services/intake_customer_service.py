@@ -116,13 +116,31 @@ class IntakeCustomerService:
             "registration_address": values.get("registration_address"), "department_code": values.get("department_code"),
         }
         if existing_id is None:
-            customer = await self.database.create_customer(data)
+            locked_creator = getattr(self.database, "create_customer_with_passport_lock", None)
+            if locked_creator is not None:
+                customer, already_exists = await locked_creator(passport, data)
+                if already_exists:
+                    return IntakeCustomerResult(
+                        "duplicate", str(session_id), customer=customer,
+                        message="Клиент с таким паспортом уже существует. Обновить его данными из текущего черновика?",
+                        actions=({"action": "replace_client", "label": "Заменить"},
+                                 {"action": "cancel", "label": "Отмена"}),
+                    )
+            else:
+                customer = await self.database.create_customer(data)
             event = "customer_created_from_intake"
         else:
             customer = await self.database.update_customer_fields(existing_id, data)
             event = "customer_replaced_from_intake"
         customer_id = int(customer["id"])
         try:
+            # Persist the chosen final folder before moving files so a retry
+            # after a partial failure resumes in the same folder.
+            if not customer.get("customer_path") and self.customer_folder_service is not None:
+                folder_path = await self.customer_folder_service.create_unique_customer_folder(
+                    last_name=customer.get("surname") or "customer", passport=passport,
+                )
+                customer = await self.database.update_customer(customer_id, "customer_path", folder_path)
             customer_path = await self._finalize_storage(session_id, customer, passport)
         except Exception:
             await self.repository.set_customer(session_id, customer_id, "finalizing_storage")
@@ -134,7 +152,7 @@ class IntakeCustomerService:
         await self.repository.link_documents_to_customer(session_id, customer_id)
         await self.repository.add_audit_event(session_id=session_id, event_type=event,
                                               external_user_id=external_user_id)
-        return IntakeCustomerResult("completed", str(session_id), customer=customer)
+        return IntakeCustomerResult("replaced" if existing_id is not None else "completed", str(session_id), customer=customer)
 
     async def _finalize_storage(self, session_id: UUID, customer: dict, passport: str) -> str | None:
         docs = await self.repository.list_documents(session_id)
