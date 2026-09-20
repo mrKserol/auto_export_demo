@@ -207,13 +207,32 @@ class DocumentIntakeService:
         return await self._summary(session)
 
     async def finish(self, session_id: UUID) -> dict:
-        session = await self._get_collecting_session(session_id)
+        session = await self._get_session_or_404(session_id)
+        session = await self._expire_if_needed(session) or session
+        summary = await self._summary(session)
+        reasons = self._finish_reasons(summary)
+        summary["ready_for_confirmation"] = not reasons
+        summary["reasons"] = reasons
+
+        if session["status"] == INTAKE_STATUS_REVIEW:
+            return summary
+        if session["status"] != INTAKE_STATUS_COLLECTING:
+            raise IntakeConflictError("Intake session cannot be finished")
+        if reasons:
+            return summary
+
         session = await self.repository.update_session_status(
             session_id,
             INTAKE_STATUS_REVIEW,
         )
         assert session is not None
         summary = await self._summary(session)
+        summary["ready_for_confirmation"] = True
+        summary["reasons"] = []
+        return summary
+
+    @staticmethod
+    def _finish_reasons(summary: dict) -> list[str]:
         reasons = []
         if summary["missing_document_types"]:
             reasons.append("missing_document_types")
@@ -223,9 +242,7 @@ class DocumentIntakeService:
             reasons.append("failed_documents")
         if summary["storage_not_ready_count"]:
             reasons.append("storage_not_ready")
-        summary["ready_for_confirmation"] = not reasons
-        summary["reasons"] = reasons
-        return summary
+        return reasons
 
     async def cancel(self, session_id: UUID) -> dict:
         session = await self._get_session_or_404(session_id)

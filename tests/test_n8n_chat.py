@@ -22,6 +22,9 @@ from app.services.channel_event import (
     CUSTOMER_DELETE,
     CUSTOMER_SEARCH_EDIT,
     DOCUMENT_RECOGNIZE,
+    INTAKE_CANCEL,
+    INTAKE_FINISH,
+    INTAKE_START,
     SPECIFICATION_ADD,
     ChannelEvent,
     build_telegram_attachment_event,
@@ -383,6 +386,27 @@ class N8NChatServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(captured["body"]["metadata"]["media_group_id"], "album-123")
+
+    async def test_posts_intake_command_events(self) -> None:
+        captured_actions: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured_actions.append(json.loads(request.content)["action"])
+            return httpx.Response(200, json=_gpt_payload())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        service = N8NChatService(
+            webhook_url=WEBHOOK_URL,
+            webhook_secret=WEBHOOK_SECRET,
+            client=client,
+        )
+        try:
+            for command in ("/intake_start", "/intake_finish", "/intake_cancel"):
+                await service.send_telegram_command(_message(text=command))
+        finally:
+            await client.aclose()
+
+        self.assertEqual(captured_actions, [INTAKE_START, INTAKE_FINISH, INTAKE_CANCEL])
 
     async def test_http_error_raises_service_error(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

@@ -9,6 +9,7 @@ from app.services.channel_event import (
     AttachmentKind,
     ChannelEvent,
     build_telegram_attachment_event,
+    build_telegram_command_event,
     build_telegram_text_event,
 )
 
@@ -80,6 +81,12 @@ class N8NChatService:
             media_group_id=media_group_id,
             caption=caption,
         )
+        return await self.send_event(event)
+
+    async def send_telegram_command(self, message: object) -> str:
+        event = build_telegram_command_event(message)
+        if event is None:
+            raise N8NChatError("unsupported Telegram command")
         return await self.send_event(event)
 
     async def send_event(self, event: ChannelEvent) -> str:

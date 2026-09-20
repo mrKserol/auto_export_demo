@@ -24,6 +24,9 @@ TELEGRAM_COMMAND_ACTIONS: dict[str, str] = {
     "/delete_customer": CUSTOMER_DELETE,
     "/add_specification": SPECIFICATION_ADD,
     "/recognize_document": DOCUMENT_RECOGNIZE,
+    "/intake_start": INTAKE_START,
+    "/intake_finish": INTAKE_FINISH,
+    "/intake_cancel": INTAKE_CANCEL,
 }
 
 

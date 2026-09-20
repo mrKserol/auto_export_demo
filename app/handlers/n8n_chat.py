@@ -5,7 +5,7 @@ import logging
 from aiogram import F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.enums import ChatType
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.types import Message
 
 from app.config import Settings
@@ -29,6 +29,30 @@ N8N_UNSUPPORTED_ATTACHMENT_USER_TEXT = (
     "Этот файл пока не поддерживается. Пришлите фото или PDF."
 )
 SUPPORTED_DOCUMENT_MIME_TYPES = {"application/pdf"}
+INTAKE_COMMANDS = ("intake_start", "intake_finish", "intake_cancel")
+
+
+@router.message(
+    StateFilter(None),
+    F.chat.type == ChatType.PRIVATE,
+    Command(*INTAKE_COMMANDS),
+)
+async def handle_n8n_intake_command(message: Message, settings: Settings) -> None:
+    if not n8n_chat_configured(settings):
+        return
+
+    service = N8NChatService(
+        webhook_url=settings.n8n_telegram_webhook_url or "",
+        webhook_secret=settings.n8n_webhook_secret or "",
+    )
+    try:
+        reply = await service.send_telegram_command(message)
+    except N8NChatError:
+        logger.exception("n8n intake command webhook failed")
+        await message.answer(N8N_UNAVAILABLE_USER_TEXT)
+        return
+
+    await message.answer(reply)
 
 
 @router.message(

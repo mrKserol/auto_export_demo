@@ -259,9 +259,28 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         session_id = await self._session_id()
         summary = await self.service.finish(session_id)
 
-        self.assertEqual(summary["status"], INTAKE_STATUS_REVIEW)
+        self.assertEqual(summary["status"], "collecting")
         self.assertFalse(summary["ready_for_confirmation"])
         self.assertIn("missing_document_types", summary["reasons"])
+
+    async def test_finish_review_session_is_idempotent(self) -> None:
+        session_id = await self._session_id()
+        self.recognition.recognize_document.side_effect = [
+            SimpleNamespace(document_type=name, confidence=0.9, extracted_fields={}, warnings=[])
+            for name in ("passport_main", "passport_registration", "tin", "snils")
+        ]
+        for index, content in enumerate((b"pm", b"pr", b"tin", b"snils")):
+            await self.service.add_document(
+                session_id,
+                _upload(content, provider_file_id=f"file-{index}"),
+            )
+
+        first = await self.service.finish(session_id)
+        second = await self.service.finish(session_id)
+
+        self.assertEqual(first, second)
+        self.assertEqual(second["status"], INTAKE_STATUS_REVIEW)
+        self.assertTrue(second["ready_for_confirmation"])
 
     async def test_finish_complete_package_returns_ready(self) -> None:
         session_id = await self._session_id()
@@ -279,6 +298,7 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(summary["ready_for_confirmation"])
         self.assertEqual(summary["reasons"], [])
+        self.assertEqual(summary["status"], INTAKE_STATUS_REVIEW)
 
     async def test_storage_failure_blocks_confirmation_until_duplicate_retry_succeeds(self) -> None:
         session_id = await self._session_id()
@@ -328,6 +348,7 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_upload_to_review_cancelled_or_expired_session(self) -> None:
         session_id = await self._session_id()
         await self.service.finish(session_id)
+        self.repository.sessions[session_id]["status"] = INTAKE_STATUS_REVIEW
         with self.assertRaises(IntakeConflictError):
             await self.service.add_document(session_id, _upload(b"after-review"))
 
