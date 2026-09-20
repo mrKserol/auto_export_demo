@@ -395,13 +395,24 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         summary = await self.service.update_review_corrections(
             session_id,
-            corrections={"surname": "Петров"},
+            corrections={"surname": "Петров", "phone": "+79990000000", "email": "manager@example.com"},
             telegram_user_id=42,
         )
 
         self.assertEqual(summary["ocr_values"]["surname"], "Иванов")
         self.assertEqual(summary["effective_values"]["surname"], "Петров")
-        self.assertEqual(summary["corrections"], {"surname": "Петров"})
+        self.assertEqual(summary["effective_values"]["phone"], "+79990000000")
+        self.assertEqual(summary["effective_values"]["email"], "manager@example.com")
+        self.assertEqual(summary["corrections"]["phone"], "+79990000000")
+        self.assertEqual(summary["corrections"]["email"], "manager@example.com")
+
+        unchanged = await self.service.update_review_corrections(
+            session_id,
+            corrections={"phone": "", "email": "   "},
+            telegram_user_id=42,
+        )
+        self.assertEqual(unchanged["effective_values"]["phone"], "+79990000000")
+        self.assertEqual(unchanged["effective_values"]["email"], "manager@example.com")
 
     async def test_review_corrections_are_scoped_to_the_current_session(self) -> None:
         first_session = await self._session_id()
@@ -417,7 +428,7 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self.service.update_review_corrections(
             second_session,
-            corrections={"surname": "Петров"},
+            corrections={"surname": "Петров", "phone": "+79991112233", "email": "other@example.com"},
             telegram_user_id=42,
         )
 
@@ -425,7 +436,11 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         second_summary = await self.service.get_review_summary(second_session)
         self.assertIsNone(first_summary["corrections"].get("surname"))
         self.assertEqual(first_summary["effective_values"]["surname"], "Иванов")
+        self.assertIsNone(first_summary["effective_values"]["phone"])
+        self.assertIsNone(first_summary["effective_values"]["email"])
         self.assertEqual(second_summary["effective_values"]["surname"], "Петров")
+        self.assertEqual(second_summary["effective_values"]["phone"], "+79991112233")
+        self.assertEqual(second_summary["effective_values"]["email"], "other@example.com")
 
     async def test_finish_incomplete_package_returns_not_ready(self) -> None:
         session_id = await self._session_id()

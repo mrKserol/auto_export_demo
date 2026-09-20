@@ -61,6 +61,8 @@ REVIEW_FIELDS = (
     "surname_translit",
     "snils",
     "tin",
+    "phone",
+    "email",
 )
 
 

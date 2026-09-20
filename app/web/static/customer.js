@@ -56,7 +56,7 @@
   }
 
   function fillIntakeValues(values){
-    const intakeFields = ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin"];
+    const intakeFields = ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin", "phone", "email"];
     intakeFields.forEach((key) => {
       const el = form.querySelector(`[name="${key}"]`);
       if (el) el.value = "";
@@ -80,6 +80,8 @@
       registration_address: values.registration_address,
       ipain: values.snils,
       tin: values.tin,
+      phone: values.phone,
+      email: values.email,
     });
   }
 
@@ -319,7 +321,7 @@
     try {
       if (intakeMode) {
         const corrections = {};
-        ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin"].forEach((key) => {
+        ["passport", "last_name", "first_name", "surname", "last_name_translit", "first_name_translit", "surname_translit", "date_issue", "by_whom_issued", "department_code", "birth_date", "birth_place", "registration_address", "ipain", "tin", "phone", "email"].forEach((key) => {
           const value = payload[key];
           if (value !== undefined) corrections[key === "last_name" ? "surname" : key === "surname" ? "patronymic" : key === "ipain" ? "snils" : key] = value;
         });

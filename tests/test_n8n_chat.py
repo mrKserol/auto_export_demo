@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
@@ -156,6 +157,18 @@ def _sent_text(bot_call: AsyncMock) -> str | None:
 
 
 class ExtractN8NAssistantTextTests(unittest.TestCase):
+    def test_intake_workflow_summary_formats_review_fields_safely(self) -> None:
+        workflow = json.loads(
+            (Path(__file__).parents[1] / "n8n" / "WF_router_FINAL.json").read_text()
+        )
+        code_nodes = [node for node in workflow["nodes"] if node["name"] == "Format Intake Review Reply"]
+        self.assertEqual(len(code_nodes), 1)
+        code = code_nodes[0]["parameters"]["jsCode"]
+        self.assertIn("fields.birth_place", code)
+        self.assertIn("fields.by_whom_issued", code)
+        self.assertIn("valueOrNotRecognized", code)
+        self.assertIn("Место рождения", code)
+        self.assertIn("Кем выдан", code)
     def test_extracts_assistant_text(self) -> None:
         self.assertEqual(
             extract_n8n_assistant_text(_gpt_payload("  hello  ")),
