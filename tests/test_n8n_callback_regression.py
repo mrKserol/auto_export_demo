@@ -34,13 +34,3 @@ async def test_intake_callback_receives_injected_services_and_reaches_customer_s
 
     intake.validate_session_owner.assert_awaited_once()
     customer.add_client.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_intake_callback_without_service_is_handled_not_type_error():
-    callback = SimpleNamespace(data="a:missing", answer=AsyncMock())
-    await handle_intake_add_client_callback(
-        callback,
-        settings=SimpleNamespace(mini_app_token_secret="legacy-secret"),
-    )
-    callback.answer.assert_awaited_once()

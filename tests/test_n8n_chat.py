@@ -493,6 +493,8 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
             settings=settings or _settings(),
             database=AsyncMock(),
             customer_upload_batch_repository=customer_upload_batch_repository,
+            intake_service=AsyncMock(),
+            intake_customer_service=AsyncMock(),
         )
 
     async def test_private_text_calls_n8n_and_replies(self) -> None:

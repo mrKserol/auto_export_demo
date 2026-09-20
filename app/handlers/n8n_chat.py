@@ -56,15 +56,11 @@ def _durable_token_store(database) -> bool:
 async def handle_intake_add_client_callback(
     callback: CallbackQuery,
     settings: Settings,
-    intake_service: DocumentIntakeService | None = None,
+    intake_service: DocumentIntakeService,
     intake_customer_service: IntakeCustomerService | None = None,
     database=None,
 ) -> None:
     callback_data = callback.data or ""
-    if intake_service is None:
-        logger.error("Intake callback received without intake_service dependency")
-        await callback.answer("Intake-сервис временно недоступен", show_alert=True)
-        return
     try:
         if callback_data.startswith("a:"):
             if callback.from_user is None or callback.message is None:
