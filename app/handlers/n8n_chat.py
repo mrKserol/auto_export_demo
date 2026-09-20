@@ -24,6 +24,7 @@ from app.services.document_intake_service import DocumentIntakeError, DocumentIn
 from app.services.channel_action_token import verify_channel_action_token
 from app.services.channel_action_token import create_channel_action_token
 from app.services.intake_customer_service import IntakeCustomerService
+from app.services.miniapp_link_service import create_intake_review_token
 
 router = Router(name="n8n_chat")
 logger = logging.getLogger(__name__)
@@ -83,7 +84,21 @@ async def handle_intake_add_client_callback(
             )
         elif callback_data.startswith("intake.action:") and action.action == "intake.cancel":
             summary = await intake_service.get_review_summary(session_id)
-            await callback.message.edit_text(intake_service.build_intake_review_card(summary))
+            review_token = create_intake_review_token(
+                settings, session_id=str(session_id), telegram_user_id=callback.from_user.id,
+                origin_chat_id=callback.message.chat.id,
+            )
+            add_token = create_channel_action_token(
+                secret=settings.mini_app_token_secret, action="intake.add_client",
+                session_id=str(session_id), channel="telegram",
+            )
+            await callback.message.edit_text(
+                intake_service.build_intake_review_card(summary),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=f"{settings.mini_app_base_url}/miniapp/customer?token={review_token}"))],
+                    [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.action:{add_token}")],
+                ]),
+            )
             await callback.answer("Отменено")
             return
         else:
