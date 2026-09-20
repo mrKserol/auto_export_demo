@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import secrets
+from datetime import timedelta
 from uuid import UUID
 
 
@@ -56,3 +57,32 @@ def telegram_callback_data(token: str) -> str:
     if len(callback_data.encode("utf-8")) > 64:
         raise ValueError("Telegram callback_data exceeds 64 bytes")
     return callback_data
+
+
+async def create_compact_action_token_db(*, database, action: str, session_id: UUID | str,
+                                         channel: str, external_user_id: str,
+                                         conversation_id: str, ttl_seconds: int = 900,
+                                         customer_id: str | None = None) -> str:
+    """Create a durable token. customer_id is intentionally not persisted in the token table."""
+    token = secrets.token_urlsafe(16)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    await database.create_channel_action_token(
+        token_hash=hashlib.sha256(token.encode()).hexdigest(), action=action,
+        session_id=UUID(str(session_id)), channel=channel,
+        external_user_id=str(external_user_id), conversation_id=str(conversation_id),
+        expires_at=expires_at, customer_id=int(customer_id) if customer_id is not None else None,
+    )
+    return token
+
+
+async def consume_compact_action_token_db(*, database, token: str, action: str | None,
+                                          channel: str, external_user_id: str,
+                                          conversation_id: str):
+    row = await database.consume_channel_action_token(
+        token_hash=hashlib.sha256(token.encode()).hexdigest(), action=action,
+        channel=channel, external_user_id=str(external_user_id),
+        conversation_id=str(conversation_id),
+    )
+    if row is None:
+        raise ValueError("invalid or expired action token")
+    return row

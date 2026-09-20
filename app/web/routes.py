@@ -136,7 +136,7 @@ def get_bot(request: Request) -> Bot:
     return request.app.state.bot
 
 
-def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: int, chat_id: int) -> InlineKeyboardMarkup:
+async def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: int, chat_id: int, database=None) -> InlineKeyboardMarkup:
     token = create_intake_review_token(
         settings,
         session_id=str(session_id),
@@ -144,10 +144,17 @@ def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: in
         origin_chat_id=chat_id,
     )
     url = f"{build_intake_review_miniapp_url(settings, token)}&session_id={session_id}"
-    action_token = create_compact_action_token(
-        action="intake.add_client", session_id=session_id, channel="telegram",
-        external_user_id=str(user_id), conversation_id=str(chat_id),
-    )
+    if database is not None:
+        from app.services.compact_action_token import create_compact_action_token_db
+        action_token = await create_compact_action_token_db(
+            database=database, action="intake.add_client", session_id=session_id,
+            channel="telegram", external_user_id=str(user_id), conversation_id=str(chat_id),
+        )
+    else:
+        action_token = create_compact_action_token(
+            action="intake.add_client", session_id=session_id, channel="telegram",
+            external_user_id=str(user_id), conversation_id=str(chat_id),
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=url))],
@@ -163,12 +170,13 @@ async def _notify_intake_review(
     summary: dict,
     settings: Settings,
     intake_service: DocumentIntakeService,
+    database=None,
     user_id: int,
     chat_id: int,
 ) -> None:
     bot = get_bot(request)
     text = build_intake_review_card(summary)
-    keyboard = _intake_review_keyboard(settings, session_id=session_id, user_id=user_id, chat_id=chat_id)
+    keyboard = await _intake_review_keyboard(settings, session_id=session_id, user_id=user_id, chat_id=chat_id, database=database)
     session = await intake_service.get_review_session(session_id)
     metadata = session.get("metadata") or {}
     card_ref = review_card_ref_from_metadata(metadata)
@@ -979,6 +987,7 @@ async def patch_intake_review(
         summary=result,
         settings=settings,
         intake_service=intake_service,
+        database=get_database(request),
         user_id=context.telegram_user_id,
         chat_id=context.origin_chat_id,
     )

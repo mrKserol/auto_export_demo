@@ -215,6 +215,21 @@ CREATE TABLE IF NOT EXISTS document_intake_review_audit (
 );
 """
 
+CREATE_CHANNEL_ACTION_TOKENS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS channel_action_tokens (
+    token_hash TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    session_id UUID NOT NULL,
+    channel TEXT NOT NULL,
+    external_user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    customer_id BIGINT,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
 CREATE_CARS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS cars (
     id BIGSERIAL PRIMARY KEY,
@@ -519,6 +534,10 @@ CREATE_INDEXES_SQL = [
     CREATE INDEX IF NOT EXISTS idx_customers_passport_normalized
     ON customers ((regexp_replace(upper(passport), '[[:space:]-]', '', 'g')));
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_channel_action_tokens_expiry
+    ON channel_action_tokens(expires_at);
+    """,
 ]
 
 INSERT_DOCUMENT_SQL = """
@@ -610,6 +629,7 @@ class Database:
             await connection.execute(CREATE_DOCUMENT_INTAKE_SESSIONS_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_INTAKE_DOCUMENTS_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_INTAKE_REVIEW_AUDIT_TABLE_SQL)
+            await connection.execute(CREATE_CHANNEL_ACTION_TOKENS_TABLE_SQL)
             for statement in ENSURE_MINI_APP_LAUNCH_CODES_COLUMNS_SQL:
                 try:
                     await connection.execute(statement)
@@ -635,6 +655,39 @@ class Database:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
         return self._pool
+
+    async def create_channel_action_token(self, *, token_hash: str, action: str,
+                                          session_id, channel: str,
+                                          external_user_id: str,
+                                          conversation_id: str, expires_at, customer_id: int | None = None) -> None:
+        async with self.pool.acquire() as connection:
+            await connection.execute(
+                """INSERT INTO channel_action_tokens
+                   (token_hash, action, session_id, channel, external_user_id,
+                    conversation_id, customer_id, expires_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8);""",
+                token_hash, action, session_id, channel, external_user_id,
+                conversation_id, customer_id, expires_at,
+            )
+            await connection.execute(
+                "DELETE FROM channel_action_tokens WHERE expires_at <= NOW();"
+            )
+
+    async def consume_channel_action_token(self, *, token_hash: str,
+                                           channel: str, external_user_id: str,
+                                           conversation_id: str, action: str | None = None) -> dict | None:
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """UPDATE channel_action_tokens
+                   SET consumed_at = NOW()
+                   WHERE token_hash = $1 AND channel = $2
+                     AND external_user_id = $3 AND conversation_id = $4
+                     AND consumed_at IS NULL AND expires_at > NOW()
+                     AND ($5::text IS NULL OR action = $5)
+                   RETURNING *;""",
+                token_hash, channel, external_user_id, conversation_id, action,
+            )
+            return dict(row) if row else None
 
     async def close(self) -> None:
         if self._pool is not None:
