@@ -19,6 +19,7 @@ from app.services.document_intake_service import (
     IntakeUpload,
     build_intake_review_card,
 )
+from app.services.channel_adapter import ExternalUrlAdapter, review_card_ref_from_metadata
 
 
 class FakeDocumentIntakeRepository:
@@ -465,6 +466,31 @@ class DocumentIntakeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Место рождения: не распознано", card)
         self.assertIn("Кем выдан: МВД", card)
         self.assertIn("Дата выдачи: 27.08.2012", card)
+
+    async def test_session_owner_requires_channel_user_and_conversation(self) -> None:
+        session_id = await self._session_id()
+        with self.assertRaises(IntakeConflictError):
+            await self.service.validate_session_owner(
+                session_id,
+                channel="wechat",
+                external_user_id="316257868",
+                conversation_id="316257868",
+            )
+        with self.assertRaises(IntakeConflictError):
+            await self.service.validate_session_owner(
+                session_id,
+                channel="telegram",
+                external_user_id="other-user",
+                conversation_id="316257868",
+            )
+
+    def test_review_card_ref_reads_legacy_metadata_and_external_url_fallback(self) -> None:
+        ref = review_card_ref_from_metadata({"review_message": {"chat_id": "42", "message_id": "7"}})
+        self.assertEqual(ref.channel, "telegram")
+        self.assertEqual(ref.conversation_id, "42")
+        self.assertEqual(ref.message_id, "7")
+        action = ExternalUrlAdapter().build_open_form_action(url="https://example.test/form", text="Открыть")
+        self.assertEqual(action, {"type": "url", "text": "Открыть", "url": "https://example.test/form"})
 
     async def test_finish_incomplete_package_returns_not_ready(self) -> None:
         session_id = await self._session_id()

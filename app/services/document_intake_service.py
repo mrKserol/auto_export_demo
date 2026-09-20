@@ -239,13 +239,26 @@ class DocumentIntakeService:
         session = await self._expire_if_needed(session) or session
         return await self._review_summary(session)
 
-    async def set_review_message(self, session_id: UUID, *, chat_id: str, message_id: str) -> dict:
+    async def set_review_card_ref(self, session_id: UUID, *, channel: str, conversation_id: str, message_id: str) -> dict:
         session = await self._get_session_or_404(session_id)
         metadata = dict(session.get("metadata") or {})
-        metadata["review_message"] = {"chat_id": str(chat_id), "message_id": str(message_id)}
+        metadata["review_card_ref"] = {
+            "channel": str(channel),
+            "conversation_id": str(conversation_id),
+            "message_id": str(message_id),
+        }
         updated = await self.repository.update_session_metadata(session_id, metadata)
         assert updated is not None
         return updated
+
+    async def set_review_message(self, session_id: UUID, *, chat_id: str, message_id: str) -> dict:
+        """Compatibility wrapper for callers created before review_card_ref."""
+        return await self.set_review_card_ref(
+            session_id,
+            channel="telegram",
+            conversation_id=chat_id,
+            message_id=message_id,
+        )
 
     async def get_review_session(self, session_id: UUID) -> dict:
         return await self._get_session_or_404(session_id)
@@ -254,12 +267,14 @@ class DocumentIntakeService:
         self,
         session_id: UUID,
         *,
+        channel: str,
         external_user_id: str,
         conversation_id: str,
     ) -> dict:
         session = await self._get_session_or_404(session_id)
         if (
-            session["started_external_user_id"] != str(external_user_id)
+            session["started_channel"] != str(channel)
+            or session["started_external_user_id"] != str(external_user_id)
             or session["started_conversation_id"] != str(conversation_id)
         ):
             raise IntakeConflictError("Intake session owner mismatch")

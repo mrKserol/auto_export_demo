@@ -63,6 +63,8 @@ from app.services.document_intake_service import (
     IntakeUpload,
     build_intake_review_card,
 )
+from app.services.channel_action_token import create_channel_action_token
+from app.services.channel_adapter import TelegramAdapter, review_card_ref_from_metadata
 from app.services.miniapp_link_service import (
     build_intake_review_miniapp_url,
     create_intake_review_token,
@@ -141,10 +143,16 @@ def _intake_review_keyboard(settings: Settings, *, session_id: UUID, user_id: in
         origin_chat_id=chat_id,
     )
     url = f"{build_intake_review_miniapp_url(settings, token)}&session_id={session_id}"
+    action_token = create_channel_action_token(
+        secret=settings.mini_app_token_secret,
+        action="intake.add_client",
+        session_id=str(session_id),
+        channel="telegram",
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Ручная коррекция", web_app=WebAppInfo(url=url))],
-            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.add_client:{session_id}")],
+            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data=f"intake.action:{action_token}")],
         ]
     )
 
@@ -163,25 +171,27 @@ async def _notify_intake_review(
     text = build_intake_review_card(summary)
     keyboard = _intake_review_keyboard(settings, session_id=session_id, user_id=user_id, chat_id=chat_id)
     session = await intake_service.get_review_session(session_id)
-    message_ref = (session.get("metadata") or {}).get("review_message") or {}
+    metadata = session.get("metadata") or {}
+    card_ref = review_card_ref_from_metadata(metadata)
     try:
-        if message_ref.get("chat_id") and message_ref.get("message_id"):
-            await bot.edit_message_text(
-                chat_id=int(message_ref["chat_id"]),
-                message_id=int(message_ref["message_id"]),
+        adapter = TelegramAdapter(bot)
+        if card_ref is not None and card_ref.conversation_id:
+            await adapter.edit_card(
+                ref=card_ref,
                 text=text,
-                reply_markup=keyboard,
+                keyboard=keyboard,
             )
             return
-        sent = await bot.send_message(
-            chat_id=chat_id,
+        ref = await adapter.send_card(
+            conversation_id=str(chat_id),
             text=text,
-            reply_markup=keyboard,
+            keyboard=keyboard,
         )
-        await intake_service.set_review_message(
+        await intake_service.set_review_card_ref(
             session_id,
-            chat_id=str(sent.chat.id),
-            message_id=str(sent.message_id),
+            channel=ref.channel,
+            conversation_id=ref.conversation_id,
+            message_id=ref.message_id,
         )
     except Exception:
         logger.exception("Failed to update intake review message")

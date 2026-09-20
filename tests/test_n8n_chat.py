@@ -37,6 +37,7 @@ from app.services.n8n_chat_service import (
     N8NChatService,
     extract_n8n_assistant_text,
 )
+from app.services.channel_action_token import verify_channel_action_token
 from tests.test_telegram_proxy import _settings as _base_settings
 
 
@@ -546,7 +547,15 @@ class N8NChatHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         method = self.bot_call.await_args.args[0]
         self.assertEqual(len(method.reply_markup.inline_keyboard), 2)
-        self.assertEqual(method.reply_markup.inline_keyboard[1][0].callback_data, "intake.add_client:11111111-1111-1111-1111-111111111111")
+        callback_data = method.reply_markup.inline_keyboard[1][0].callback_data
+        self.assertTrue(callback_data.startswith("intake.action:"))
+        action = verify_channel_action_token(
+            callback_data.split(":", 1)[1],
+            secret=_settings().mini_app_token_secret,
+            expected_channel="telegram",
+        )
+        self.assertEqual(action.action, "intake.add_client")
+        self.assertEqual(action.session_id, "11111111-1111-1111-1111-111111111111")
 
     async def test_slash_command_is_not_sent_to_n8n(self) -> None:
         send_telegram_text = AsyncMock(return_value=ASSISTANT_TEXT)

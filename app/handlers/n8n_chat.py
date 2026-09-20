@@ -21,6 +21,8 @@ from app.services.n8n_chat_service import (
     n8n_chat_configured,
 )
 from app.services.document_intake_service import DocumentIntakeError, DocumentIntakeService
+from app.services.channel_action_token import verify_channel_action_token
+from app.services.channel_action_token import create_channel_action_token
 
 router = Router(name="n8n_chat")
 logger = logging.getLogger(__name__)
@@ -35,18 +37,31 @@ SUPPORTED_DOCUMENT_MIME_TYPES = {"application/pdf"}
 INTAKE_COMMANDS = ("intake_start", "intake_finish", "intake_cancel")
 
 
-@router.callback_query(F.data.startswith("intake.add_client:"))
+@router.callback_query(F.data.startswith("intake.action:") | F.data.startswith("intake.add_client:"))
 async def handle_intake_add_client_callback(
     callback: CallbackQuery,
+    settings: Settings,
     intake_service: DocumentIntakeService,
 ) -> None:
-    session_text = (callback.data or "").split(":", 1)[-1]
+    callback_data = callback.data or ""
     try:
-        session_id = UUID(session_text)
+        if callback_data.startswith("intake.action:"):
+            action = verify_channel_action_token(
+                callback_data.split(":", 1)[1],
+                secret=settings.mini_app_token_secret,
+                expected_channel="telegram",
+            )
+            if action.action != "intake.add_client":
+                raise ValueError
+            session_id = UUID(action.session_id)
+        else:
+            # Read legacy callbacks from cards created before action tokens.
+            session_id = UUID(callback_data.split(":", 1)[-1])
         if callback.from_user is None or callback.message is None:
             raise ValueError
         await intake_service.validate_session_owner(
             session_id,
+            channel="telegram",
             external_user_id=str(callback.from_user.id),
             conversation_id=str(callback.message.chat.id),
         )
@@ -86,7 +101,13 @@ async def handle_n8n_intake_command(message: Message, settings: Settings) -> Non
             if button.get("type") == "web_app" and isinstance(button.get("url"), str):
                 keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), web_app=WebAppInfo(url=button["url"]))])
             elif button.get("type") == "callback":
-                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=f"intake.add_client:{reply['session_id']}")])
+                action_token = create_channel_action_token(
+                    secret=settings.mini_app_token_secret,
+                    action=str(button.get("action") or "intake.add_client"),
+                    session_id=reply["session_id"],
+                    channel="telegram",
+                )
+                keyboard.append([InlineKeyboardButton(text=str(button.get("text") or ""), callback_data=f"intake.action:{action_token}")])
         await message.answer(reply["text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
         return
     if isinstance(reply, dict) and reply.get("type") == "web_app":
