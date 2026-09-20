@@ -110,6 +110,37 @@ class DocumentIntakeRepository:
             )
             return _record_to_dict(row)
 
+    async def set_customer(self, session_id: UUID, customer_id: int, status: str) -> dict | None:
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """UPDATE document_intake_sessions
+                   SET customer_id=$2, status=$3, updated_at=NOW()
+                   WHERE id=$1 RETURNING *;""",
+                session_id, customer_id, status,
+            )
+            return _record_to_dict(row)
+
+    async def link_documents_to_customer(self, session_id: UUID, customer_id: int) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE document_intake_documents SET customer_id=$2, updated_at=NOW() WHERE session_id=$1;",
+                session_id, customer_id,
+            )
+
+    async def add_audit_event(
+        self, *, session_id: UUID, event_type: str, external_user_id: str,
+        changed_fields: list[str] | None = None,
+    ) -> None:
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """INSERT INTO document_intake_review_audit
+                   (id, session_id, telegram_user_id, actor_external_user_id,
+                    event_type, changed_fields)
+                   VALUES ($1,$2,$3,$3,$4,$5::jsonb);""",
+                uuid4(), session_id, external_user_id, event_type,
+                json.dumps(changed_fields or [], ensure_ascii=False),
+            )
+
     async def update_session_metadata(self, session_id: UUID, metadata: dict) -> dict | None:
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(

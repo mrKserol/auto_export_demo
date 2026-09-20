@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS document_intake_sessions (
     started_conversation_id TEXT NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     manual_corrections JSONB NOT NULL DEFAULT '{}'::jsonb
+    ,customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL
 );
 """
 
@@ -196,6 +197,7 @@ CREATE TABLE IF NOT EXISTS document_intake_documents (
     warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    ,customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL
 );
 """
 
@@ -207,6 +209,8 @@ CREATE TABLE IF NOT EXISTS document_intake_review_audit (
         ON DELETE CASCADE,
     telegram_user_id TEXT NOT NULL,
     changed_fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+    event_type TEXT NOT NULL DEFAULT 'review_correction',
+    actor_external_user_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
@@ -483,6 +487,22 @@ CREATE_INDEXES_SQL = [
     """
     ALTER TABLE document_intake_sessions
     ADD COLUMN IF NOT EXISTS manual_corrections JSONB NOT NULL DEFAULT '{}'::jsonb;
+    """,
+    """
+    ALTER TABLE document_intake_sessions
+    ADD COLUMN IF NOT EXISTS customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL;
+    """,
+    """
+    ALTER TABLE document_intake_documents
+    ADD COLUMN IF NOT EXISTS customer_id BIGINT REFERENCES customers(id) ON DELETE SET NULL;
+    """,
+    """
+    ALTER TABLE document_intake_review_audit
+    ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'review_correction';
+    """,
+    """
+    ALTER TABLE document_intake_review_audit
+    ADD COLUMN IF NOT EXISTS actor_external_user_id TEXT;
     """,
     "DROP INDEX IF EXISTS uq_document_intake_provider_file;",
     "DROP INDEX IF EXISTS uq_document_intake_content;",
@@ -1008,6 +1028,17 @@ class Database:
             row = await connection.fetchrow(
                 "SELECT * FROM customers WHERE passport = $1;",
                 passport,
+            )
+            return _record_to_dict(row) if row else None
+
+    async def find_customer_by_normalized_passport(self, passport: str) -> dict | None:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        async with self._pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """SELECT * FROM customers
+                   WHERE regexp_replace(upper(passport), '[[:space:]-]', '', 'g') = $1
+                   FOR UPDATE;""", passport,
             )
             return _record_to_dict(row) if row else None
 

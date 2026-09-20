@@ -34,6 +34,7 @@ from app.services.customer_document_recognition_service import (
 )
 from app.services.customer_folder_service import CustomerFolderService
 from app.services.document_intake_service import DocumentIntakeService
+from app.services.intake_customer_service import IntakeCustomerService
 from app.services.estimate_recognition_service import EstimateRecognitionService
 from app.services.miniapp_background_tasks import pending_miniapp_task_count
 from app.services.miniapp_batch_api_service import (
@@ -160,6 +161,13 @@ async def run_application(settings: Settings) -> None:
         yandex_disk_client=yandex_disk_client,
         max_file_bytes=settings.customer_upload_max_file_bytes,
     )
+    intake_customer_service = IntakeCustomerService(
+        database=database,
+        repository=DocumentIntakeRepository(database.pool),
+        intake_service=document_intake_service,
+        customer_folder_service=customer_folder_service,
+        yandex_disk_client=yandex_disk_client,
+    )
 
     recovered = await recover_stale_miniapp_batches_on_startup(
         customer_upload_batch_repository,
@@ -203,6 +211,7 @@ async def run_application(settings: Settings) -> None:
             customer_batch_recognition_service=customer_batch_recognition_service,
             customer_folder_service=customer_folder_service,
             document_intake_service=document_intake_service,
+            intake_customer_service=intake_customer_service,
             enable_processing=settings.enable_processing,
         ),
         name="aiogram-polling",

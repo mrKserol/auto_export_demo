@@ -15,9 +15,10 @@ class ChannelAction:
     session_id: str
     channel: str
     exp: int
+    customer_id: str | None = None
 
 
-def create_channel_action_token(*, secret: str, action: str, session_id: str, channel: str, ttl_seconds: int = 900) -> str:
+def create_channel_action_token(*, secret: str, action: str, session_id: str, channel: str, ttl_seconds: int = 900, customer_id: str | None = None) -> str:
     payload = {
         "action": action,
         "session_id": str(session_id),
@@ -25,6 +26,8 @@ def create_channel_action_token(*, secret: str, action: str, session_id: str, ch
         "exp": int(time.time()) + int(ttl_seconds),
         "nonce": secrets.token_urlsafe(8),
     }
+    if customer_id is not None:
+        payload["customer_id"] = str(customer_id)
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
     signature = hmac.new(secret.encode(), raw, hashlib.sha256).digest()
@@ -51,4 +54,5 @@ def verify_channel_action_token(token: str, *, secret: str, expected_channel: st
         session_id=str(payload["session_id"]),
         channel=str(payload["channel"]),
         exp=int(payload["exp"]),
+        customer_id=str(payload["customer_id"]) if payload.get("customer_id") is not None else None,
     )

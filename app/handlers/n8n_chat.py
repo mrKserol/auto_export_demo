@@ -23,6 +23,7 @@ from app.services.n8n_chat_service import (
 from app.services.document_intake_service import DocumentIntakeError, DocumentIntakeService
 from app.services.channel_action_token import verify_channel_action_token
 from app.services.channel_action_token import create_channel_action_token
+from app.services.intake_customer_service import IntakeCustomerService
 
 router = Router(name="n8n_chat")
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ async def handle_intake_add_client_callback(
     callback: CallbackQuery,
     settings: Settings,
     intake_service: DocumentIntakeService,
+    intake_customer_service: IntakeCustomerService | None = None,
 ) -> None:
     callback_data = callback.data or ""
     try:
@@ -51,7 +53,7 @@ async def handle_intake_add_client_callback(
                 secret=settings.mini_app_token_secret,
                 expected_channel="telegram",
             )
-            if action.action != "intake.add_client":
+            if action.action not in {"intake.add_client", "intake.replace_client", "intake.cancel"}:
                 raise ValueError
             session_id = UUID(action.session_id)
         else:
@@ -69,8 +71,52 @@ async def handle_intake_add_client_callback(
         await callback.answer("Нет доступа к этой intake-сессии", show_alert=True)
         return
 
-    await callback.answer("Проверяю клиента по паспорту…")
-    await callback.message.answer("Проверяю клиента по паспорту…")
+    if intake_customer_service is None:
+        await callback.answer("Проверяю клиента по паспорту…")
+        return
+    try:
+        if callback_data.startswith("intake.action:") and action.action == "intake.replace_client":
+            result = await intake_customer_service.replace_client(
+                session_id=session_id, customer_id=int(action.customer_id),
+                channel="telegram", external_user_id=str(callback.from_user.id),
+                conversation_id=str(callback.message.chat.id),
+            )
+        elif callback_data.startswith("intake.action:") and action.action == "intake.cancel":
+            await callback.answer("Отменено")
+            return
+        else:
+            result = await intake_customer_service.add_client(
+                session_id=session_id, channel="telegram",
+                external_user_id=str(callback.from_user.id),
+                conversation_id=str(callback.message.chat.id),
+            )
+    except Exception:
+        logger.exception("intake customer action failed")
+        await callback.answer("Не удалось обработать действие", show_alert=True)
+        return
+    await callback.answer()
+    if result.status == "missing_passport":
+        await callback.message.edit_text(result.message or "Заполните номер паспорта в ручной коррекции")
+    elif result.status == "duplicate":
+        secret = settings.mini_app_token_secret
+        replace_token = create_channel_action_token(secret=secret, action="intake.replace_client", session_id=str(session_id), channel="telegram", customer_id=str(result.customer["id"]))
+        cancel_token = create_channel_action_token(secret=secret, action="intake.cancel", session_id=str(session_id), channel="telegram")
+        await callback.message.edit_text(
+            result.message or "Клиент с таким паспортом уже существует.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Заменить", callback_data=f"intake.action:{replace_token}")],
+                [InlineKeyboardButton(text="Отмена", callback_data=f"intake.action:{cancel_token}")],
+            ]),
+        )
+    elif result.status == "completed":
+        customer = result.customer or {}
+        await callback.message.edit_text(
+            "КЛИЕНТ ДОБАВЛЕН\n\n"
+            f"ФИО: {customer.get('surname') or 'не распознано'} {customer.get('first_name') or ''}\n"
+            f"Паспорт: {customer.get('passport') or 'не распознано'}\n"
+            f"Телефон: {customer.get('phone') or 'не распознано'}\n"
+            f"Email: {customer.get('email') or 'не распознано'}"
+        )
 
 
 @router.message(
