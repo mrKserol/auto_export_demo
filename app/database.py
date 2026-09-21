@@ -3,9 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import secrets
 
 import asyncpg
+
+
+logger = logging.getLogger(__name__)
+CUSTOMER_NAME_FUZZY_THRESHOLD = 0.38
 
 
 CREATE_CASES_TABLE_SQL = """
@@ -614,6 +619,10 @@ class Database:
     async def connect(self) -> None:
         self._pool = await asyncpg.create_pool(self._database_url)
         async with self._pool.acquire() as connection:
+            try:
+                await connection.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+            except asyncpg.PostgresError:
+                logger.warning("pg_trgm extension is unavailable; fuzzy customer search disabled")
             await connection.execute(CREATE_CASES_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENTS_TABLE_SQL)
             await connection.execute(CREATE_DOCUMENT_FIELDS_TABLE_SQL)
@@ -1119,6 +1128,57 @@ class Database:
                 LIMIT $2;
                 """,
                 normalized,
+                bounded_limit,
+            )
+            return [_record_to_dict(row) for row in rows if row is not None]
+
+    async def fuzzy_search_customers_by_name(
+        self,
+        name: str,
+        *,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Fallback search using pg_trgm after exact/partial matching is empty."""
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        normalized = " ".join(str(name or "").strip().split()).lower()
+        if not normalized:
+            return []
+        bounded_limit = max(1, min(int(limit), 10))
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                WITH candidates AS (
+                    SELECT id, first_name, last_name, surname, phone, email,
+                           passport, tin, ipain, registration_address,
+                           specification_id, created_at, updated_at,
+                           lower(regexp_replace(
+                               concat_ws(' ', last_name, first_name, surname),
+                               '\\s+', ' ', 'g'
+                           )) AS name_variant_one,
+                           lower(regexp_replace(
+                               concat_ws(' ', first_name, surname, last_name),
+                               '\\s+', ' ', 'g'
+                           )) AS name_variant_two
+                    FROM customers
+                )
+                SELECT id, first_name, last_name, surname, phone, email,
+                       passport, tin, ipain, registration_address,
+                       specification_id, created_at, updated_at,
+                       GREATEST(
+                           similarity(name_variant_one, $1),
+                           similarity(name_variant_two, $1)
+                       ) AS match_score
+                FROM candidates
+                WHERE GREATEST(
+                    similarity(name_variant_one, $1),
+                    similarity(name_variant_two, $1)
+                ) >= $2
+                ORDER BY match_score DESC, id
+                LIMIT $3;
+                """,
+                normalized,
+                CUSTOMER_NAME_FUZZY_THRESHOLD,
                 bounded_limit,
             )
             return [_record_to_dict(row) for row in rows if row is not None]

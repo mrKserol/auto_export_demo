@@ -28,11 +28,12 @@ def api():
 async def test_customer_search_auth_and_not_found(api):
     app, database = api
     database.search_customers_by_name.return_value = []
+    database.fuzzy_search_customers_by_name.return_value = []
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         assert (await client.post("/internal/n8n/customers/search", json={"name": "Ирина"})).status_code == 401
         assert (await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": "bad"}, json={"name": "Ирина"})).status_code == 401
         response = await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": SECRET}, json={"name": "  Ирина   Губайдулина "})
-    assert response.json() == {"ok": True, "status": "not_found", "customers": []}
+    assert response.json() == {"ok": True, "status": "not_found", "match_type": "fuzzy", "customers": []}
     database.search_customers_by_name.assert_awaited_once_with("Ирина Губайдулина", limit=10)
 
 
@@ -53,12 +54,33 @@ async def test_customer_search_returns_found_and_multiple_statuses(api):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": SECRET}, json={"name": "ирина"})
     assert response.json()["status"] == "found"
+    assert response.json()["match_type"] == "exact"
     assert response.json()["customers"][0]["created_at"] == created_at.isoformat()
     assert response.json()["customers"][0]["updated_at"] == updated_at.isoformat()
     database.search_customers_by_name.return_value = [row, {**row, "id": 2}]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": SECRET}, json={"name": "Ирина"})
     assert response.json()["status"] == "multiple"
+    assert response.json()["match_type"] == "exact"
+
+
+@pytest.mark.asyncio
+async def test_customer_search_fuzzy_fallback_returns_scores_and_fuzzy_type(api):
+    app, database = api
+    database.search_customers_by_name.return_value = []
+    database.fuzzy_search_customers_by_name.return_value = [
+        {"id": 7, "first_name": "Ирина", "last_name": "Губайдулина", "match_score": 0.71}
+    ]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/internal/n8n/customers/search",
+            headers={"X-N8N-Webhook-Secret": SECRET},
+            json={"name": "Губайдулин"},
+        )
+    body = response.json()
+    assert body["status"] == "found"
+    assert body["match_type"] == "fuzzy"
+    assert body["customers"][0]["match_score"] == 0.71
 
 
 @pytest.mark.asyncio

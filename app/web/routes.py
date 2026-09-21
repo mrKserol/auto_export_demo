@@ -307,11 +307,18 @@ async def search_internal_customers(
     if not normalized_name:
         return error_response(422, "VALIDATION_ERROR", "Имя клиента не должно быть пустым")
     customers = await database.search_customers_by_name(normalized_name, limit=10)
+    match_type = "exact"
+    if not customers:
+        customers = await database.fuzzy_search_customers_by_name(normalized_name, limit=10)
+        match_type = "fuzzy"
     status = "not_found" if not customers else "found" if len(customers) == 1 else "multiple"
+    for customer in customers:
+        customer.setdefault("match_score", None)
     return JSONResponse(
         content=jsonable_encoder({
             "ok": True,
             "status": status,
+            "match_type": match_type,
             "customers": customers,
         })
     )
