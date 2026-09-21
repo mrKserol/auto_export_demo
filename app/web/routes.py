@@ -84,6 +84,10 @@ class InternalTelegramFileRequest(BaseModel):
     file_id: str = Field(min_length=1)
 
 
+class InternalCustomerSearchRequest(BaseModel):
+    name: str = Field(min_length=1)
+
+
 class InternalIntakeSessionCreateRequest(BaseModel):
     channel: str = Field(min_length=1)
     external_user_id: str = Field(min_length=1)
@@ -283,6 +287,27 @@ def _intake_error_response(error: DocumentIntakeError) -> JSONResponse:
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/internal/n8n/customers/search")
+async def search_internal_customers(
+    payload: InternalCustomerSearchRequest,
+    settings: Settings = Depends(get_settings),
+    database: Database = Depends(get_database),
+    x_n8n_webhook_secret: str | None = Header(
+        default=None,
+        alias="X-N8N-Webhook-Secret",
+    ),
+) -> JSONResponse:
+    auth_error = _authorize_n8n_internal_request(settings, x_n8n_webhook_secret)
+    if auth_error is not None:
+        return auth_error
+    normalized_name = " ".join(payload.name.strip().split())
+    if not normalized_name:
+        return error_response(422, "VALIDATION_ERROR", "Имя клиента не должно быть пустым")
+    customers = await database.search_customers_by_name(normalized_name, limit=10)
+    status = "not_found" if not customers else "found" if len(customers) == 1 else "multiple"
+    return JSONResponse(content={"ok": True, "status": status, "customers": customers})
 
 
 @router.post("/internal/n8n/telegram-file")

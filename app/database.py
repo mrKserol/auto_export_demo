@@ -1088,6 +1088,41 @@ class Database:
             )
             return _record_to_dict(row) if row else None
 
+    async def search_customers_by_name(
+        self,
+        name: str,
+        *,
+        limit: int = 10,
+    ) -> list[dict]:
+        if self._pool is None:
+            raise RuntimeError("Database pool is not initialized")
+        normalized = " ".join(str(name or "").strip().split()).lower()
+        if not normalized:
+            return []
+        bounded_limit = max(1, min(int(limit), 10))
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT id, first_name, last_name, surname, phone, email,
+                       passport, tin, ipain, registration_address,
+                       specification_id, created_at, updated_at
+                FROM customers
+                WHERE lower(regexp_replace(
+                    concat_ws(' ', last_name, first_name, surname),
+                    '\\s+', ' ', 'g'
+                )) LIKE '%' || $1 || '%'
+                   OR lower(regexp_replace(
+                    concat_ws(' ', first_name, surname, last_name),
+                    '\\s+', ' ', 'g'
+                )) LIKE '%' || $1 || '%'
+                ORDER BY surname NULLS LAST, first_name NULLS LAST, id
+                LIMIT $2;
+                """,
+                normalized,
+                bounded_limit,
+            )
+            return [_record_to_dict(row) for row in rows if row is not None]
+
     async def find_customer_by_normalized_passport(self, passport: str) -> dict | None:
         if self._pool is None:
             raise RuntimeError("Database pool is not initialized")
