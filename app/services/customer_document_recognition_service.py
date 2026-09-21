@@ -58,6 +58,11 @@ OCR текст документа:
 }}
 Правила:
 - Извлекай только данные главной страницы паспорта.
+- ФИО в паспорте РФ обычно представлено отдельными строками: ФАМИЛИЯ, ИМЯ, ОТЧЕСТВО.
+- last_name = Фамилия, first_name = Имя, surname = Отчество.
+- В этой системе surname означает именно ОТЧЕСТВО, а не фамилию.
+- Не дублируй last_name в surname. Если отчество отсутствует или не распознано — верни surname = null.
+- Если OCR содержит метку "ОТЧЕСТВО", бери значение, относящееся к этой строке.
 - Паспорт храни в формате "80 06 035956".
 - Серия паспорта — 4 цифры, номер — 6 цифр.
 - Серия и номер паспорта часто напечатаны красными цифрами сбоку страницы.
@@ -770,6 +775,12 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         "birth_place": _normalize_birth_place(gpt_json.get("birth_place")),
     }
 
+    ocr_patronymic = _extract_explicit_patronymic(ocr_text)
+    if ocr_patronymic and ocr_patronymic != fields.get("last_name"):
+        fields["surname"] = ocr_patronymic
+    elif fields.get("surname") and fields.get("surname") == fields.get("last_name"):
+        fields["surname"] = None
+
     fallback = extract_passport_main_fields({"ocr_text": text_without_mrz})
     for key, value in fallback.items():
         if key == "passport":
@@ -817,6 +828,18 @@ def _postprocess_passport_main(gpt_json: dict, ocr_text: str) -> dict:
         logger.warning("Passport number not found after passport main extraction")
 
     return {key: value for key, value in fields.items() if value}
+
+
+def _extract_explicit_patronymic(ocr_text: str) -> str | None:
+    """Read only the value immediately following an explicit ОТЧЕСТВО label."""
+    lines = [re.sub(r"\s+", " ", line).strip(" :\t") for line in ocr_text.splitlines()]
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r"ОТЧЕСТВО", line, flags=re.IGNORECASE):
+            continue
+        for candidate in lines[index + 1:index + 3]:
+            if candidate and not re.fullmatch(r"(ФАМИЛИЯ|ИМЯ|ОТЧЕСТВО)", candidate, flags=re.IGNORECASE):
+                return _clean_text(candidate)
+    return None
 
 
 def _normalize_birth_place(value: object) -> str | None:

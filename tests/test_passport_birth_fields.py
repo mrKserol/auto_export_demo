@@ -29,6 +29,21 @@ SAMPLE_OCR = """
 
 
 class PassportBirthFieldsTests(unittest.TestCase):
+    def test_explicit_ocr_patronymic_maps_to_surname(self) -> None:
+        fields = _postprocess_passport_main(
+            {"last_name": "ГУБАЙДУЛИНА", "first_name": "ИРИНА", "surname": "ГУБАЙДУЛИНА"},
+            "ФАМИЛИЯ\nГУБАЙДУЛИНА\nИМЯ\nИРИНА\nОТЧЕСТВО\nВЛАДИМИРОВНА",
+        )
+        self.assertEqual(fields["last_name"], "ГУБАЙДУЛИНА")
+        self.assertEqual(fields["first_name"], "ИРИНА")
+        self.assertEqual(fields["surname"], "ВЛАДИМИРОВНА")
+
+    def test_passport_surname_does_not_duplicate_last_name_without_explicit_patronymic(self) -> None:
+        fields = _postprocess_passport_main(
+            {"last_name": "ГУБАЙДУЛИНА", "first_name": "ИРИНА", "surname": "ГУБАЙДУЛИНА"},
+            "ФАМИЛИЯ\nГУБАЙДУЛИНА\nИМЯ\nИРИНА",
+        )
+        self.assertNotEqual(fields.get("surname"), fields.get("last_name"))
     def test_gpt_birth_date_passes_postprocess(self) -> None:
         fields = _postprocess_passport_main(
             {
