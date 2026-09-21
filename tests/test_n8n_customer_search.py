@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -38,11 +39,22 @@ async def test_customer_search_auth_and_not_found(api):
 @pytest.mark.asyncio
 async def test_customer_search_returns_found_and_multiple_statuses(api):
     app, database = api
-    row = {"id": 1, "first_name": "Ирина", "last_name": "Губайдулина", "surname": None}
+    created_at = datetime(2026, 9, 21, 10, 30, tzinfo=timezone.utc)
+    updated_at = datetime(2026, 9, 21, 11, 45, tzinfo=timezone.utc)
+    row = {
+        "id": 1,
+        "first_name": "Ирина",
+        "last_name": "Губайдулина",
+        "surname": None,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
     database.search_customers_by_name.return_value = [row]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": SECRET}, json={"name": "ирина"})
     assert response.json()["status"] == "found"
+    assert response.json()["customers"][0]["created_at"] == created_at.isoformat()
+    assert response.json()["customers"][0]["updated_at"] == updated_at.isoformat()
     database.search_customers_by_name.return_value = [row, {**row, "id": 2}]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/internal/n8n/customers/search", headers={"X-N8N-Webhook-Secret": SECRET}, json={"name": "Ирина"})

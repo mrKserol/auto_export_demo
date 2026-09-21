@@ -14,6 +14,7 @@ from uuid import UUID
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from pydantic import ValidationError
@@ -307,7 +308,13 @@ async def search_internal_customers(
         return error_response(422, "VALIDATION_ERROR", "Имя клиента не должно быть пустым")
     customers = await database.search_customers_by_name(normalized_name, limit=10)
     status = "not_found" if not customers else "found" if len(customers) == 1 else "multiple"
-    return JSONResponse(content={"ok": True, "status": status, "customers": customers})
+    return JSONResponse(
+        content=jsonable_encoder({
+            "ok": True,
+            "status": status,
+            "customers": customers,
+        })
+    )
 
 
 @router.post("/internal/n8n/telegram-file")
